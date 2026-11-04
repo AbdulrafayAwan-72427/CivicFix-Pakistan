@@ -1,0 +1,2 @@
+D:/UNI/Semister_3/DSA/Lab/CIvicFix-Pakistan/build/CMakeFiles/edit_cache.dir
+D:/UNI/Semister_3/DSA/Lab/CIvicFix-Pakistan/build/CMakeFiles/rebuild_cache.dir

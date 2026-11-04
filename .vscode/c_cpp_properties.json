@@ -1,0 +1,17 @@
+
+{
+    "configurations": [
+        {
+            "name": "CivicFix",
+            "compilerPath": "C:/msys64/ucrt64/bin/g++.exe",
+            "intelliSenseMode": "windows-gcc-x64",
+            "cppStandard": "c++17",
+            "cStandard": "c17",
+            "includePath": [
+                "${workspaceFolder}/backend-cpp/include",
+                "${workspaceFolder}/backend-cpp/include/**"
+            ]
+        }
+    ],
+    "version": 4
+}

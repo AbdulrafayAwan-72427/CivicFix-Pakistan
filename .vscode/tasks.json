@@ -1,0 +1,73 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build CivicFix",
+            "type": "shell",
+            "command": "C:/msys64/ucrt64/bin/g++.exe",
+            "args": [
+                "-std=c++17",
+                "-Wall",
+                "-Wextra",
+                "-pedantic",
+                "-g",
+                "-I",
+                "${workspaceFolder}/backend-cpp/Include",
+                "${workspaceFolder}/backend-cpp/src/main.cpp",
+                "${workspaceFolder}/backend-cpp/src/models.cpp",
+                "${workspaceFolder}/backend-cpp/src/ComplaintQueue.cpp",
+                "${workspaceFolder}/backend-cpp/src/ActionStack.cpp",
+                "${workspaceFolder}/backend-cpp/src/StatusHistory.cpp",
+                "${workspaceFolder}/backend-cpp/src/Graph.cpp",
+                "${workspaceFolder}/backend-cpp/src/Sorting.cpp",
+                "${workspaceFolder}/backend-cpp/src/Database.cpp",
+                "-o",
+                "${workspaceFolder}/backend-cpp/civicfix.exe",
+                "-lsqlite3"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "Build CivicFix API",
+            "type": "shell",
+            "command": "C:/msys64/ucrt64/bin/g++.exe",
+            "args": [
+                "-std=c++17",
+                "-Wall",
+                "-Wextra",
+                "-pedantic",
+                "-g",
+                "-I",
+                "${workspaceFolder}/backend-cpp/Include",
+                "${workspaceFolder}/backend-cpp/src/server.cpp",
+                "${workspaceFolder}/backend-cpp/src/models.cpp",
+                "${workspaceFolder}/backend-cpp/src/ComplaintQueue.cpp",
+                "${workspaceFolder}/backend-cpp/src/ActionStack.cpp",
+                "${workspaceFolder}/backend-cpp/src/StatusHistory.cpp",
+                "${workspaceFolder}/backend-cpp/src/Graph.cpp",
+                "${workspaceFolder}/backend-cpp/src/Sorting.cpp",
+                "${workspaceFolder}/backend-cpp/src/Database.cpp",
+                "-o",
+                "${workspaceFolder}/backend-cpp/civicfix_api.exe",
+                "-lsqlite3",
+                "-lws2_32"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "group": "build"
+        }
+    ]
+}

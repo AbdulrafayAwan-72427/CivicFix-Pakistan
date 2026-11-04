@@ -1,0 +1,28 @@
+{
+  "model_version": "civicfix-ml-v1",
+  "labels": [
+    "Garbage Collection",
+    "Road Damage",
+    "Water Supply",
+    "Drainage",
+    "Streetlight",
+    "Other"
+  ],
+  "dataset_path": "/home/hatch/workspace/civicfix/CIvicFix-Pakistan/ml-service/datasets/complaints.csv",
+  "dataset_size": 360,
+  "per_category": {
+    "Drainage": 60,
+    "Garbage Collection": 60,
+    "Road Damage": 60,
+    "Water Supply": 60,
+    "Other": 60,
+    "Streetlight": 60
+  },
+  "train_size": 288,
+  "test_size": 72,
+  "test_seed": 42,
+  "accuracy": 0.9722222222222222,
+  "precision_macro": 0.9732905982905983,
+  "recall_macro": 0.9722222222222222,
+  "f1_macro": 0.9721980676328502
+}

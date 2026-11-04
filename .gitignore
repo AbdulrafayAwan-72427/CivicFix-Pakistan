@@ -1,0 +1,38 @@
+# CivicFix Pakistan — files to keep OUT of GitHub
+# (keep these local: they are built, personal, or too large)
+
+# Built binaries (Windows + Linux)
+*.exe
+*.dll
+*.o
+*.obj
+backend-cpp/civicfix
+backend-cpp/civicfix_linux
+backend-cpp/civicfix_api
+backend-cpp/test_persistent_undo
+dsa-viva/dsa_viva
+dsa-viva/dsa_viva.exe
+
+# Test / throwaway databases (keep the real one, see below)
+database/api_test.db
+database/test_civicfix.db
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Python / ML
+ml-service/__pycache__/
+ml-service/.venv/
+ml-service/venv/
+*.pyc
+ml-service/models/*.joblib
+ml-service/models/*.pkl
+
+# VS Code local settings (keep tasks/launch, ignore personal settings)
+.vscode/settings.json
+
+# OS files
+.DS_Store
+Thumbs.db
