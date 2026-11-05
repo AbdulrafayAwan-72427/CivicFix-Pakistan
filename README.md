@@ -1,53 +1,92 @@
 # CivicFix Pakistan
 
-AI-powered municipal complaint management system — a university
-Data Structures and Algorithms semester project, built as a real,
-working system.
+A complete municipal complaint management system for Pakistani cities.
+Citizens report civic problems — garbage, broken roads, water shortages,
+blocked drains, streetlights — with a photo and a map pin, and track
+the report from submission to resolution. City staff work through the
+reports in order, and admins manage the whole operation from one
+dashboard.
 
-Citizens report problems (garbage, roads, water, drainage,
-streetlights), track them by code, and see their status history.
-Admins manage complaints, assign staff, update statuses, and undo
-the latest admin action. Staff work from an active queue.
+## How it works
 
-## Two ways to use this repo — read this first
+1. **A citizen reports a problem** — title, description, category,
+   area, a photo of the problem, and a pin dropped on the map.
+2. **The system helps route it** — it suggests a category from the
+   description and the photo, so the report lands with the right team.
+   A human always makes the final call.
+3. **An admin assigns it** to a staff member and updates its status
+   as work progresses.
+4. **The citizen tracks it** with a tracking code (like `CFX-102`),
+   watching it move: Submitted → Under Review → Assigned →
+   In Progress → Resolved. Every change is recorded in a permanent
+   audit trail, and a wrong status change can be undone.
 
-This repo deliberately has **two tracks**, because the viva and a
-live demo need different things:
+## Features
 
-### 1. Viva track — `dsa-viva/` (standalone)
+**For citizens**
+- Submit a report with a photo and a map location
+- Track any report by its code, with a step-by-step progress view
+- See all your own reports, plus the full history of each one
 
-For the DSA viva only. A self-contained copy of the custom DSA code
-with its own demo program. No SQLite, no API, no React, no ML.
+**For staff**
+- A work queue in first-come-first-served order
+- All active complaints with their photo, location, and history
+
+**For admins**
+- Operations dashboard: totals, resolution rate, charts by status,
+  category, and area
+- Search, filter, and sort complaints; export them as CSV
+- A live map with a pin for every located complaint
+- Assign complaints to staff, change statuses, and undo mistakes
+- Manage the team: add staff members who can then log in
+- A full audit feed of every action taken
+
+**Accounts and security**
+- Real login with email and password; passwords are stored salted
+  and hashed, never in plain text
+- Login tokens expire after 24 hours; logging out ends the session
+- Each role sees only its own tools — citizens can't reach admin
+  pages, and staff can't manage users
+
+## Tech stack
+
+| Part | Technology |
+| --- | --- |
+| Backend API | C++17, zero-dependency REST API (standard library + sockets) |
+| Database | SQLite |
+| Frontend | React 18 + Vite, Leaflet maps (OpenStreetMap) |
+| Smart routing | Python + FastAPI service that suggests a category from the complaint text and photo |
+
+The React app talks only to the C++ API; the API owns the database
+and calls the Python service. The frontend never touches the database
+directly.
+
+## Project structure
 
 ```
-# From the project root
-g++ -std=c++17 -Wall -Wextra -I dsa-viva/include \
-  dsa-viva/src/viva_main.cpp dsa-viva/src/models.cpp \
-  dsa-viva/src/ComplaintQueue.cpp dsa-viva/src/ActionStack.cpp \
-  dsa-viva/src/StatusHistory.cpp dsa-viva/src/Graph.cpp \
-  dsa-viva/src/Sorting.cpp -o dsa-viva/dsa_viva
-./dsa-viva/dsa_viva   # expect: ALL DSA VIVA CHECKS PASSED
+CIvicFix-Pakistan/
+├── backend-cpp/
+│   ├── Include/              # Models and the database layer
+│   ├── src/server.cpp        # REST API server
+│   ├── src/Database.cpp      # SQLite access, migrations
+│   └── src/main.cpp          # Console demo
+├── frontend/                 # Vite + React 18 (Citizen / Staff / Admin)
+├── ml-service/               # FastAPI service: text + photo categorisation
+│   ├── app.py  train.py  requirements.txt
+│   └── datasets/complaints.csv
+├── database/
+│   ├── civicfix.db           # Seeded: complaints CFX-101/102/103, 2 users, 5 areas
+│   └── schema.sql
+├── documentation/
+│   ├── API.md                # API endpoints + examples
+│   ├── LOCAL_TESTING.md      # Local testing guide
+│   └── DEPLOYMENT.md         # Going-live guide
+└── .gitignore
 ```
 
-See `dsa-viva/README.md` for what each structure does, its
-complexity, and viva talking points. It is a snapshot copy of the
-DSA files in `backend-cpp/` — re-copy them here if you change the
-backend DSA code.
+## Run it locally (3 terminals)
 
-### 2. Full system track — API + React + ML (for GitHub / live)
-
-```
-React frontend  →  C++ REST API  →  SQLite database
-                         ↓ (planned, not wired yet)
-                    Python ML service (FastAPI)
-```
-
-React must never talk directly to SQLite or to the ML service.
-The C++ backend owns the data and will call ML later.
-
-## Quick start — local testing (3 terminals)
-
-Full steps, test checklist, and troubleshooting are in
+Full steps, a test checklist, and troubleshooting are in
 `documentation/LOCAL_TESTING.md`. Short version, from the project
 root, testing on a **copy** of the database:
 
@@ -56,6 +95,10 @@ root, testing on a **copy** of the database:
 copy database\civicfix.db database\api_test.db
 backend-cpp\civicfix_api.exe 8080 database\api_test.db
 ```
+If you changed the C++ code, rebuild it first in VS Code:
+`Ctrl+Shift+P` → "Tasks: Run Task" → "Build CivicFix API".
+Stop the running API before rebuilding — Windows locks a running
+`.exe` file, so the build can't replace it while it's running.
 
 **Terminal 2 — React frontend (port 5173):**
 ```
@@ -66,98 +109,47 @@ npm run dev
 Open http://localhost:5173. The dev server proxies `/api` to
 http://localhost:8080, so the API must be running on 8080.
 
-**Terminal 3 — ML service (port 8000):**
+**Terminal 3 — Smart routing service (port 8000):**
 ```
 cd ml-service
-pip install -r requirements.txt
+python -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
 python train.py
-uvicorn app:app --host 127.0.0.1 --port 8000
+uvicorn app:app --port 8000
 ```
-Test: `curl http://127.0.0.1:8000/predict -d '{"text":"pani nahi aa raha"}'`
-should return Water Supply.
+The API still works if this service is down — new complaints just
+save without a suggested category until it is back.
 
-## Project structure
+**Demo logins** (seeded automatically on first run — change them
+for real use):
+- Admin: `admin@civicfix.pk` / `admin123`
+- Citizen: `ali@example.com` / `ali123`
+- Staff: created by an admin, password `staff123` for the demo staff
 
-```
-CIvicFix-Pakistan/
-├── dsa-viva/                 # Standalone DSA package for the viva
-├── backend-cpp/
-│   ├── Include/              # models, dsa, services/Database
-│   ├── src/main.cpp          # Console DSA + database demo
-│   ├── src/server.cpp        # REST API server (zero-dependency)
-│   └── test/test_persistent_undo.cpp
-├── frontend/                 # Vite + React 18 (Citizen / Admin / Staff)
-├── ml-service/               # FastAPI + TF-IDF/Logistic Regression
-│   ├── datasets/complaints.csv   # 360 labelled demo examples
-│   ├── train.py  app.py  requirements.txt
-│   └── models/               # Generated by train.py (gitignored)
-├── database/
-│   ├── civicfix.db           # Seeded: CFX-101/102/103, 2 users, 5 areas
-│   └── schema.sql
-├── documentation/
-│   ├── API.md                # C++ API endpoints + curl examples
-│   ├── LOCAL_TESTING.md      # Local 3-terminal testing guide
-│   ├── DEPLOYMENT.md         # GitHub + going-live guide
-│   ├── PERSISTENT_UNDO_TEST_REPORT.md
-│   └── CivicFix_Pakistan_Project_Handoff.md
-└── .gitignore
-```
+## API
 
-## Custom DSA (the semester requirement)
+See `documentation/API.md` for the full endpoint list. Highlights:
 
-All custom, none replaced with STL shortcuts in the demos:
-
-- **ComplaintQueue** — linked list, FIFO, O(1) enqueue/dequeue/peek
-- **ActionStack** — linked list, LIFO, models undo order
-- **StatusHistory** — linked list, insert/search/delete by position
-- **Graph + BFS** — adjacency list, fewest-edges path (not road distance), O(V+E)
-- **Bubble Sort** — by waiting time, longest first, O(n²) worst
-- **Counting Sort** — by priority 1–5, stable, O(n+k), used by the API's `?sort=priority`
-
-The API also uses the real queue (`GET /api/queue`) and the real
-counting sort, so the DSA is in the live workflow, not only in demos.
-
-## API (C++)
-
-See `documentation/API.md` for the full endpoint table. Highlights:
-
-- `GET /api/health`, `/api/areas`, `/api/users`, `/api/complaints`
-- `POST /api/complaints` (tracking code auto-generated), track by
-  `GET /api/complaints/track/CFX-102`
+- `GET /api/health`, `/api/areas`, `/api/complaints`, `/api/stats`
+- `POST /api/auth/register`, `/api/auth/login`, `/api/auth/logout`,
+  `GET /api/auth/me`
+- `POST /api/complaints` (tracking code auto-generated, photo and
+  map pin included), track by `GET /api/complaints/track/CFX-102`
 - `PATCH /api/complaints/{id}/status` with validated transitions
   (Submitted → Under Review → Assigned → In Progress → Resolved)
-- `POST /api/assignments`, `GET /api/stats`, `GET /api/queue`
-- `POST /api/admin/undo` — persistent undo, tested: second undo and
-  unsafe undo are both rejected
+- `POST /api/assignments`, `GET /api/queue`,
+  `POST /api/admin/undo` — the last admin action can be undone
 
-The server is zero-dependency (standard library + sockets) because
-cpp-httplib / nlohmann/json were not installed; the API contract is
-the same, so a frontend built on it does not need to change if the
-server library is swapped later. It is single-threaded.
+## Current status
 
-## ML service
+Working today: login, report submission with photo and map pin,
+tracking, staff queue, admin dashboard and map, assignments, status
+changes with undo, audit trail, and category suggestions from text
+and photos.
 
-- TF-IDF (word 1–2 grams + character 3–5 grams, for Roman Urdu
-  spelling variation) + Logistic Regression
-- Dataset: 360 examples, 60 per category, 180 English + 180 Roman Urdu
-- Held-out test (72 examples): accuracy 0.972, macro F1 0.972 —
-  **optimistic**, because test examples share templates with training
-  data. See `ml-service/README.md` for the confusion matrix and
-  honest limits. Real citizen text will score lower.
-- Low confidence (< 0.5) is flagged `needs_human_review: true`.
-- No Urdu script yet (Roman Urdu only), single-label only, priority
-  stays rule-based (1–5) in the C++ backend.
-
-## What is NOT done yet — be honest about this in a demo
-
-- **No real login/auth.** The `users` table has no password column.
-  The frontend has a demo user selector; that ID is not proof of
-  identity. Add password hashing + tokens before any public use.
-- **C++ → ML wiring is not done yet.** The ML service works
-  standalone and is tested with curl, but the C++ API does not call
-  it yet. React must still not call ML directly.
-- **No CORS headers on the C++ server.** Local dev works via the
-  Vite proxy. A deployed frontend needs CORS on the API or the same
-  proxy setup — see `documentation/DEPLOYMENT.md`.
-- **SQLite on ephemeral hosting will not persist.** See deployment
-  notes before going live with real data.
+Still to do before public use: change the demo passwords, add
+CORS headers (or keep the Vite proxy) for a deployed frontend, and
+a hosted deployment — see `documentation/DEPLOYMENT.md`. The photo
+categorisation is a general-purpose image classifier used as a
+routing hint, not a model trained on civic photos, so low-confidence
+results are flagged for a human to check.
