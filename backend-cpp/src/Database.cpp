@@ -63,6 +63,63 @@ bool Database::connect(const std::string& path) {
         return false;
     }
 
+    // Login sessions (tokens). One row per login; expired rows are
+    // ignored by getSessionUser and can be deleted on logout.
+    const char* createSessionsTable =
+        "CREATE TABLE IF NOT EXISTS sessions ("
+        "token TEXT PRIMARY KEY,"
+        "user_id INTEGER NOT NULL,"
+        "expires_at TEXT NOT NULL,"
+        "created_at TEXT DEFAULT CURRENT_TIMESTAMP,"
+        "FOREIGN KEY (user_id) REFERENCES users(id)"
+        ");";
+    if (!execute(createSessionsTable)) {
+        std::cerr << "Could not create sessions table.\n";
+        disconnect();
+        return false;
+    }
+
+    // Password column, added 5 Nov 2026. Old databases keep their
+    // users; the server seeds a demo password for any user whose
+    // hash is still empty (see seedDefaultPasswords in server.cpp).
+    {
+        sqlite3_stmt* stmt = nullptr;
+        bool exists = false;
+        if (sqlite3_prepare_v2(db, "PRAGMA table_info(users);", -1, &stmt, nullptr) == SQLITE_OK) {
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const unsigned char* name = sqlite3_column_text(stmt, 1);
+                if (name && std::string(reinterpret_cast<const char*>(name)) == "password_hash") { exists = true; break; }
+            }
+        }
+        sqlite3_finalize(stmt);
+        if (!exists) execute("ALTER TABLE users ADD COLUMN password_hash TEXT DEFAULT '';");
+    }
+
+    // Map + AI columns, added 5 Nov 2026. ALTER TABLE ... ADD COLUMN
+    // is safe on an existing database: old rows keep their data and
+    // the new columns default to 0 / ''.
+    {
+        const char* newColumns[][2] = {
+            {"latitude", "REAL DEFAULT 0"},
+            {"longitude", "REAL DEFAULT 0"},
+            {"ai_category", "TEXT DEFAULT ''"},
+            {"ai_confidence", "REAL DEFAULT 0"},
+            {"ai_image_label", "TEXT DEFAULT ''"},
+        };
+        for (const auto& col : newColumns) {
+            sqlite3_stmt* stmt = nullptr;
+            bool exists = false;
+            if (sqlite3_prepare_v2(db, "PRAGMA table_info(complaints);", -1, &stmt, nullptr) == SQLITE_OK) {
+                while (sqlite3_step(stmt) == SQLITE_ROW) {
+                    const unsigned char* name = sqlite3_column_text(stmt, 1);
+                    if (name && std::string(reinterpret_cast<const char*>(name)) == col[0]) { exists = true; break; }
+                }
+            }
+            sqlite3_finalize(stmt);
+            if (!exists) execute(std::string("ALTER TABLE complaints ADD COLUMN ") + col[0] + " " + col[1] + ";");
+        }
+    }
+
     std::cout << "Database connected successfully.\n";
     return true;
 }
@@ -259,8 +316,8 @@ bool Database::insertUser(const User& user) {
 
     const char* sql =
         "INSERT INTO users "
-        "(full_name, email, phone, role, area_id, is_active) "
-        "VALUES (?, ?, ?, ?, ?, ?);";
+        "(full_name, email, phone, role, area_id, is_active, password_hash) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?);";
 
     sqlite3_stmt* stmt = nullptr;
 
@@ -302,6 +359,8 @@ bool Database::insertUser(const User& user) {
         bindResult = sqlite3_bind_int(stmt, 5, user.areaId);
     if (bindResult == SQLITE_OK)
         bindResult = sqlite3_bind_int(stmt, 6, user.isActive ? 1 : 0);
+    if (bindResult == SQLITE_OK)
+        bindResult = sqlite3_bind_text(stmt, 7, user.passwordHash.c_str(), -1, SQLITE_TRANSIENT);
 
     if (bindResult != SQLITE_OK) {
         std::cerr << "User parameter binding failed: "
@@ -382,8 +441,9 @@ bool Database::insertComplaint(const Complaint& complaint) {
     const char* sql =
         "INSERT INTO complaints "
         "(tracking_code, citizen_id, title, description, category, "
-        "priority_score, area_id, photo_path, status, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+        "priority_score, area_id, photo_path, status, created_at, updated_at, "
+        "latitude, longitude, ai_category, ai_confidence, ai_image_label) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
 
     sqlite3_stmt* stmt = nullptr;
 
@@ -420,6 +480,16 @@ bool Database::insertComplaint(const Complaint& complaint) {
         bindResult = sqlite3_bind_text(stmt, 10, complaint.createdAt.c_str(), -1, SQLITE_TRANSIENT);
     if (bindResult == SQLITE_OK)
         bindResult = sqlite3_bind_text(stmt, 11, complaint.updatedAt.c_str(), -1, SQLITE_TRANSIENT);
+    if (bindResult == SQLITE_OK)
+        bindResult = sqlite3_bind_double(stmt, 12, complaint.latitude);
+    if (bindResult == SQLITE_OK)
+        bindResult = sqlite3_bind_double(stmt, 13, complaint.longitude);
+    if (bindResult == SQLITE_OK)
+        bindResult = sqlite3_bind_text(stmt, 14, complaint.aiSuggestedCategory.c_str(), -1, SQLITE_TRANSIENT);
+    if (bindResult == SQLITE_OK)
+        bindResult = sqlite3_bind_double(stmt, 15, complaint.aiConfidence);
+    if (bindResult == SQLITE_OK)
+        bindResult = sqlite3_bind_text(stmt, 16, complaint.aiImageLabel.c_str(), -1, SQLITE_TRANSIENT);
 
     if (bindResult != SQLITE_OK) {
         std::cerr << "Complaint parameter binding failed: "
@@ -440,6 +510,32 @@ bool Database::insertComplaint(const Complaint& complaint) {
 
     sqlite3_finalize(stmt);
     return result == SQLITE_DONE;
+}
+
+bool Database::updateComplaintPhoto(int complaintId, const std::string& photoPath) {
+    if (db == nullptr) return false;
+    const char* sql = "UPDATE complaints SET photo_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, photoPath.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 2, complaintId);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+bool Database::updateComplaintAi(int complaintId, const std::string& aiCategory, double aiConfidence, const std::string& aiImageLabel) {
+    if (db == nullptr) return false;
+    const char* sql = "UPDATE complaints SET ai_category = ?, ai_confidence = ?, ai_image_label = ? WHERE id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, aiCategory.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_double(stmt, 2, aiConfidence);
+    sqlite3_bind_text(stmt, 3, aiImageLabel.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 4, complaintId);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return ok;
 }
 
 // ========================================
@@ -536,7 +632,8 @@ std::vector<Complaint> Database::getAllComplaints() {
     const char* sql =
         "SELECT id, tracking_code, citizen_id, title, description, "
         "category, priority_score, area_id, photo_path, status, "
-        "created_at, updated_at "
+        "created_at, updated_at, latitude, longitude, ai_category, "
+        "ai_confidence, ai_image_label "
         "FROM complaints ORDER BY id;";
 
     sqlite3_stmt* stmt = nullptr;
@@ -602,6 +699,11 @@ std::vector<Complaint> Database::getAllComplaints() {
 
         complaint.createdAt = getText(10);
         complaint.updatedAt = getText(11);
+        complaint.latitude = sqlite3_column_double(stmt, 12);
+        complaint.longitude = sqlite3_column_double(stmt, 13);
+        complaint.aiSuggestedCategory = getText(14);
+        complaint.aiConfidence = sqlite3_column_double(stmt, 15);
+        complaint.aiImageLabel = getText(16);
 
         complaints.push_back(complaint);
     }
@@ -1353,6 +1455,11 @@ static bool fillComplaintFromRow(sqlite3_stmt* stmt, Complaint& c) {
     c.status = statusFromStringDb(getText(9));
     c.createdAt = getText(10);
     c.updatedAt = getText(11);
+    c.latitude = sqlite3_column_double(stmt, 12);
+    c.longitude = sqlite3_column_double(stmt, 13);
+    c.aiSuggestedCategory = getText(14);
+    c.aiConfidence = sqlite3_column_double(stmt, 15);
+    c.aiImageLabel = getText(16);
     return true;
 }
 
@@ -1361,7 +1468,8 @@ bool Database::getComplaintById(int complaintId, Complaint& complaint) {
     const char* sql =
         "SELECT id, tracking_code, citizen_id, title, description, "
         "category, priority_score, area_id, photo_path, status, "
-        "created_at, updated_at FROM complaints WHERE id = ?;";
+        "created_at, updated_at, latitude, longitude, ai_category, "
+        "ai_confidence, ai_image_label FROM complaints WHERE id = ?;";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
     sqlite3_bind_int(stmt, 1, complaintId);
@@ -1379,7 +1487,8 @@ bool Database::getComplaintByTrackingCode(const std::string& trackingCode, Compl
     const char* sql =
         "SELECT id, tracking_code, citizen_id, title, description, "
         "category, priority_score, area_id, photo_path, status, "
-        "created_at, updated_at FROM complaints WHERE tracking_code = ?;";
+        "created_at, updated_at, latitude, longitude, ai_category, "
+        "ai_confidence, ai_image_label FROM complaints WHERE tracking_code = ?;";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
     sqlite3_bind_text(stmt, 1, trackingCode.c_str(), -1, SQLITE_TRANSIENT);
@@ -1418,7 +1527,7 @@ std::vector<User> Database::getAllUsers() {
     std::vector<User> users;
     if (db == nullptr) return users;
     const char* sql =
-        "SELECT id, full_name, email, phone, role, area_id, is_active "
+        "SELECT id, full_name, email, phone, role, area_id, is_active, password_hash "
         "FROM users ORDER BY id;";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return users;
@@ -1437,10 +1546,110 @@ std::vector<User> Database::getAllUsers() {
                : (role == "Staff") ? UserRole::Staff : UserRole::Citizen;
         u.areaId = sqlite3_column_int(stmt, 5);
         u.isActive = sqlite3_column_int(stmt, 6) != 0;
+        u.passwordHash = getText(7);
         users.push_back(u);
     }
     sqlite3_finalize(stmt);
     return users;
+}
+
+bool Database::getUserByEmail(const std::string& email, User& user) {
+    if (db == nullptr) return false;
+    const char* sql =
+        "SELECT id, full_name, email, phone, role, area_id, is_active, password_hash "
+        "FROM users WHERE email = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, email.c_str(), -1, SQLITE_TRANSIENT);
+    bool found = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        auto getText = [stmt](int column) -> std::string {
+            const unsigned char* v = sqlite3_column_text(stmt, column);
+            return v ? reinterpret_cast<const char*>(v) : "";
+        };
+        user.id = sqlite3_column_int(stmt, 0);
+        user.fullName = getText(1);
+        user.email = getText(2);
+        user.phone = getText(3);
+        std::string role = getText(4);
+        user.role = (role == "Admin") ? UserRole::Admin
+                  : (role == "Staff") ? UserRole::Staff : UserRole::Citizen;
+        user.areaId = sqlite3_column_int(stmt, 5);
+        user.isActive = sqlite3_column_int(stmt, 6) != 0;
+        user.passwordHash = getText(7);
+        found = true;
+    }
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+bool Database::setUserPasswordHash(int userId, const std::string& hash) {
+    if (db == nullptr) return false;
+    const char* sql = "UPDATE users SET password_hash = ? WHERE id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, hash.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 2, userId);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+bool Database::createSession(int userId, const std::string& token, const std::string& expiresAt) {
+    if (db == nullptr) return false;
+    const char* sql = "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?);";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 2, userId);
+    sqlite3_bind_text(stmt, 3, expiresAt.c_str(), -1, SQLITE_TRANSIENT);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+bool Database::getSessionUser(const std::string& token, User& user) {
+    if (db == nullptr) return false;
+    // Expired sessions are ignored: expires_at is a UTC timestamp
+    // string, so a plain string comparison against SQLite's now works.
+    const char* sql =
+        "SELECT u.id, u.full_name, u.email, u.phone, u.role, u.area_id, u.is_active, u.password_hash "
+        "FROM users u JOIN sessions s ON s.user_id = u.id "
+        "WHERE s.token = ? AND s.expires_at > datetime('now');";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_TRANSIENT);
+    bool found = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        auto getText = [stmt](int column) -> std::string {
+            const unsigned char* v = sqlite3_column_text(stmt, column);
+            return v ? reinterpret_cast<const char*>(v) : "";
+        };
+        user.id = sqlite3_column_int(stmt, 0);
+        user.fullName = getText(1);
+        user.email = getText(2);
+        user.phone = getText(3);
+        std::string role = getText(4);
+        user.role = (role == "Admin") ? UserRole::Admin
+                  : (role == "Staff") ? UserRole::Staff : UserRole::Citizen;
+        user.areaId = sqlite3_column_int(stmt, 5);
+        user.isActive = sqlite3_column_int(stmt, 6) != 0;
+        user.passwordHash = getText(7);
+        found = true;
+    }
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+bool Database::deleteSession(const std::string& token) {
+    if (db == nullptr) return false;
+    const char* sql = "DELETE FROM sessions WHERE token = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_TRANSIENT);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return ok;
 }
 
 bool Database::assignComplaint(int complaintId, int staffId, int assignedByAdminId) {

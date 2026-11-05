@@ -45,6 +45,8 @@ public:
 
     // Complaint Management
     bool insertComplaint(const Complaint& complaint);
+    bool updateComplaintPhoto(int complaintId, const std::string& photoPath);
+    bool updateComplaintAi(int complaintId, const std::string& aiCategory, double aiConfidence, const std::string& aiImageLabel);
     void displayAllComplaints();
 
     std::vector<Complaint> getAllComplaints();
@@ -64,6 +66,12 @@ public:
 
     // API helpers: single-record lookup, lists, assignments
     bool getComplaintById(int complaintId, Complaint& complaint);
+    // Authentication: password hashes and login sessions (tokens).
+    bool getUserByEmail(const std::string& email, User& user);
+    bool setUserPasswordHash(int userId, const std::string& hash);
+    bool createSession(int userId, const std::string& token, const std::string& expiresAt);
+    bool getSessionUser(const std::string& token, User& user);
+    bool deleteSession(const std::string& token);
     bool getComplaintByTrackingCode(const std::string& trackingCode, Complaint& complaint);
     std::vector<Area> getAllAreas();
     std::vector<User> getAllUsers();

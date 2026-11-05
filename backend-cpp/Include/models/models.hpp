@@ -37,6 +37,9 @@ struct User {
     UserRole role = UserRole::Citizen;
     int areaId = 0;
     bool isActive = true;
+    // Password hash, format: <salt hex>$<sha256(salt + password)>.
+    // NEVER returned by the API (userJson omits it).
+    std::string passwordHash;
 };
 
 struct Area {
@@ -56,6 +59,16 @@ struct Complaint {
     int priorityScore = 3;
     int areaId = 0;
     std::string photoPath;
+    // Map location picked by the citizen (0,0 = not set; Lahore is
+    // around 31.5, 74.3, so 0,0 is never a real complaint location).
+    double latitude = 0.0;
+    double longitude = 0.0;
+    // AI results, filled by the C++ server after it asks the ML
+    // service (text category + image detection). Empty = ML service
+    // was not reachable when the complaint was saved.
+    std::string aiSuggestedCategory;
+    double aiConfidence = 0.0;
+    std::string aiImageLabel;
     ComplaintStatus status = ComplaintStatus::Submitted;
     std::string createdAt;
     std::string updatedAt;

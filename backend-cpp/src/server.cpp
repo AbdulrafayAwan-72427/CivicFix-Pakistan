@@ -25,6 +25,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
+#include <random>
+#include <filesystem>
+#include <fstream>
 #include <ctime>
 #include <iostream>
 #include <map>
@@ -126,6 +130,22 @@ static bool jsonGetInt(const std::string& body, const std::string& key, int& out
     return true;
 }
 
+static bool jsonGetDouble(const std::string& body, const std::string& key, double& out) {
+    std::string needle = "\"" + key + "\"";
+    size_t pos = body.find(needle);
+    if (pos == std::string::npos) return false;
+    pos = body.find(':', pos + needle.size());
+    if (pos == std::string::npos) return false;
+    pos++;
+    while (pos < body.size() && std::isspace(static_cast<unsigned char>(body[pos]))) pos++;
+    size_t start = pos;
+    if (pos < body.size() && (body[pos] == '-' || body[pos] == '+')) pos++;
+    while (pos < body.size() && (std::isdigit(static_cast<unsigned char>(body[pos])) || body[pos] == '.')) pos++;
+    if (pos == start) return false;
+    try { out = std::stod(body.substr(start, pos - start)); } catch (...) { return false; }
+    return true;
+}
+
 static std::string nowTimestamp() {
     std::time_t t = std::time(nullptr);
     char buf[32];
@@ -168,6 +188,12 @@ static std::string complaintJson(const Complaint& c) {
         ",\"category\":" + jsonStr(toString(c.category)) +
         ",\"priorityScore\":" + std::to_string(c.priorityScore) +
         ",\"areaId\":" + std::to_string(c.areaId) +
+        ",\"photoPath\":" + jsonStr(c.photoPath) +
+        ",\"latitude\":" + std::to_string(c.latitude) +
+        ",\"longitude\":" + std::to_string(c.longitude) +
+        ",\"aiSuggestedCategory\":" + jsonStr(c.aiSuggestedCategory) +
+        ",\"aiConfidence\":" + std::to_string(c.aiConfidence) +
+        ",\"aiImageLabel\":" + jsonStr(c.aiImageLabel) +
         ",\"status\":" + jsonStr(toString(c.status)) +
         ",\"createdAt\":" + jsonStr(c.createdAt) +
         ",\"updatedAt\":" + jsonStr(c.updatedAt) + "}";
@@ -285,6 +311,126 @@ static bool userExists(Database& db, int userId, User* found = nullptr) {
     return false;
 }
 
+
+// ------------------------------------------------------------------
+// Photo upload + ML wiring (C++ -> ML service, never React -> ML).
+//
+// Photos arrive as base64 in JSON (the zero-dependency server has
+// no multipart parser). They are saved under uploads/ next to the
+// project root and served back by GET /uploads/<file>. The ML
+// service runs on 127.0.0.1:8000; if it is down, the complaint is
+// still saved — the AI fields just stay empty, and the frontend
+// says so instead of inventing a prediction.
+// ------------------------------------------------------------------
+static std::vector<unsigned char> base64Decode(const std::string& in) {
+    auto val = [](char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+    std::vector<unsigned char> out;
+    int acc = 0, bits = 0;
+    for (char c : in) {
+        if (c == '=') break;
+        int v = val(c);
+        if (v < 0) continue;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back(static_cast<unsigned char>((acc >> bits) & 0xFF));
+        }
+    }
+    return out;
+}
+
+static bool savePhoto(const std::string& b64Raw, const std::string& extRaw,
+                      const std::string& trackingCode, std::string& relPath) {
+    std::string ext = extRaw;
+    for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (ext == "jpeg") ext = "jpg";
+    if (ext != "jpg" && ext != "png") return false;
+    std::string b64 = b64Raw;
+    size_t comma = b64.find(',');
+    if (b64.rfind("data:", 0) == 0 && comma != std::string::npos) b64 = b64.substr(comma + 1);
+    std::vector<unsigned char> bytes = base64Decode(b64);
+    if (bytes.empty() || bytes.size() > 5 * 1024 * 1024) return false;
+    std::error_code ec;
+    std::filesystem::create_directories("uploads", ec);
+    relPath = "uploads/" + trackingCode + "." + ext;
+    std::ofstream out(relPath, std::ios::binary);
+    if (!out) return false;
+    out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    return out.good();
+}
+
+static bool mlPost(const std::string& path, const std::string& body,
+                   const std::string& contentType, std::string& outBody) {
+    socket_t s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s == SOCKET_INVALID) return false;
+#ifdef _WIN32
+    DWORD timeoutMs = 3000;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+#else
+    timeval tv{};
+    tv.tv_sec = 3;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(8000);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) { CLOSE_SOCKET(s); return false; }
+    std::string req = "POST " + path + " HTTP/1.1\r\nHost: 127.0.0.1:8000\r\nContent-Type: " + contentType +
+        "\r\nContent-Length: " + std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+    size_t sent = 0;
+    while (sent < req.size()) {
+        int n = send(s, req.c_str() + sent, static_cast<int>(req.size() - sent), 0);
+        if (n <= 0) { CLOSE_SOCKET(s); return false; }
+        sent += static_cast<size_t>(n);
+    }
+    std::string raw;
+    char buf[4096];
+    int n = 0;
+    while ((n = recv(s, buf, sizeof(buf), 0)) > 0) raw.append(buf, n);
+    CLOSE_SOCKET(s);
+    if (raw.find(" 200 ") == std::string::npos && raw.rfind("HTTP/1.1 200", 0) != 0) return false;
+    size_t sep = raw.find("\r\n\r\n");
+    if (sep == std::string::npos) return false;
+    outBody = raw.substr(sep + 4);
+    return true;
+}
+
+static bool mlPredictText(const std::string& text, std::string& category, double& confidence) {
+    std::string resp;
+    if (!mlPost("/predict", "{\"text\":" + jsonStr(text) + "}", "application/json", resp)) return false;
+    return jsonGetString(resp, "predicted_category", category) && jsonGetDouble(resp, "confidence", confidence);
+}
+
+static bool mlDetectImage(const std::string& filePath, std::string& category,
+                          double& confidence, std::string& topLabel) {
+    std::ifstream in(filePath, std::ios::binary);
+    if (!in) return false;
+    std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    std::string boundary = "----CivicFixBoundary7d2a";
+    std::string filename = filePath.substr(filePath.find_last_of("/\\") + 1);
+    std::string ext = filename.size() >= 4 ? filename.substr(filename.size() - 3) : "jpg";
+    std::string mime = (ext == "png") ? "image/png" : "image/jpeg";
+    std::string body = "--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"" + filename +
+        "\"\r\nContent-Type: " + mime + "\r\n\r\n" + bytes + "\r\n--" + boundary + "--\r\n";
+    std::string resp;
+    if (!mlPost("/detect-image", body, "multipart/form-data; boundary=" + boundary, resp)) return false;
+    if (!jsonGetString(resp, "predicted_category", category)) return false;
+    jsonGetDouble(resp, "confidence", confidence);
+    jsonGetString(resp, "label", topLabel);
+    return true;
+}
+
 static std::vector<std::string> splitPath(const std::string& path) {
     std::vector<std::string> parts;
     std::string cur;
@@ -310,12 +456,152 @@ static bool isNumber(const std::string& s) {
 struct Response {
     int code;
     std::string body;
+    std::string contentType = "application/json";
 };
+
+
+// ------------------------------------------------------------------
+// SHA-256 (standard implementation, zero-dependency). Used only for
+// password hashing: stored value is "<salt hex>$<sha256(salt+password)>",
+// so the same password for two users still hashes differently and
+// a leaked database does not hand out the passwords directly.
+// Test vector: sha256("abc") =
+// ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad.
+// ------------------------------------------------------------------
+static std::string sha256Hex(const std::string& input) {
+    static const uint32_t K[64] = {
+        0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+        0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+        0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+        0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+        0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+        0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+        0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+        0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2};
+    uint32_t h[8] = {0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
+    std::string msg = input;
+    uint64_t bitLen = static_cast<uint64_t>(msg.size()) * 8;
+    msg.push_back(static_cast<char>(0x80));
+    while (msg.size() % 64 != 56) msg.push_back('\0');
+    for (int i = 7; i >= 0; i--) msg.push_back(static_cast<char>((bitLen >> (i * 8)) & 0xFF));
+    auto rotr = [](uint32_t x, int n) { return (x >> n) | (x << (32 - n)); };
+    for (size_t off = 0; off < msg.size(); off += 64) {
+        uint32_t w[64];
+        for (int i = 0; i < 16; i++)
+            w[i] = (static_cast<uint32_t>(static_cast<unsigned char>(msg[off + i * 4])) << 24) |
+                   (static_cast<uint32_t>(static_cast<unsigned char>(msg[off + i * 4 + 1])) << 16) |
+                   (static_cast<uint32_t>(static_cast<unsigned char>(msg[off + i * 4 + 2])) << 8) |
+                   static_cast<uint32_t>(static_cast<unsigned char>(msg[off + i * 4 + 3]));
+        for (int i = 16; i < 64; i++) {
+            uint32_t s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            uint32_t s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+        }
+        uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
+        for (int i = 0; i < 64; i++) {
+            uint32_t S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+            uint32_t ch = (e & f) ^ ((~e) & g);
+            uint32_t t1 = hh + S1 + ch + K[i] + w[i];
+            uint32_t S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+            uint32_t mj = (a & b) ^ (a & c) ^ (b & c);
+            uint32_t t2 = S0 + mj;
+            hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+        }
+        h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+    }
+    static const char* hex = "0123456789abcdef";
+    std::string out;
+    for (int i = 0; i < 8; i++)
+        for (int s = 28; s >= 0; s -= 4) out += hex[(h[i] >> s) & 0xF];
+    return out;
+}
+
+static std::string randomHex(size_t bytes) {
+    std::random_device rd;
+    std::string out;
+    static const char* hex = "0123456789abcdef";
+    for (size_t i = 0; i < bytes; i++) {
+        unsigned int v = rd() & 0xFF;
+        out += hex[v >> 4];
+        out += hex[v & 0xF];
+    }
+    return out;
+}
+
+static std::string hashPassword(const std::string& password) {
+    std::string salt = randomHex(16);
+    return salt + "$" + sha256Hex(salt + password);
+}
+
+static bool verifyPassword(const std::string& password, const std::string& stored) {
+    size_t sep = stored.find('$');
+    if (sep == std::string::npos) return false;
+    return sha256Hex(stored.substr(0, sep) + password) == stored.substr(sep + 1);
+}
+
+static std::string expiryIn24h() {
+    std::time_t t = std::time(nullptr) + 24 * 3600;
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::gmtime(&t));
+    return std::string(buf);
+}
+
+// Demo passwords for the seeded users, set only when a user has no
+// password yet (first run after the upgrade). These are DEMO
+// passwords for a student project — change them after first login
+// in any real use. Admin: admin123, Citizen: ali123, Staff: staff123.
+static void seedDefaultPasswords(Database& db) {
+    for (const User& u : db.getAllUsers()) {
+        if (!u.passwordHash.empty()) continue;
+        std::string plain = (u.role == UserRole::Admin) ? "admin123"
+                            : (u.role == UserRole::Staff) ? "staff123" : "ali123";
+        if (db.setUserPasswordHash(u.id, hashPassword(plain)))
+            std::cout << "[auth] Seeded demo password for " << u.email << " (" << toString(u.role) << ")\n";
+    }
+}
+
+// ------------------------------------------------------------------
+// RBAC, enforced server-side with login tokens (added 5 Nov 2026).
+//
+// The frontend logs in at POST /api/auth/login and sends the token
+// as "Authorization: Bearer <token>". The server looks the token up
+// in the sessions table, gets the user, and checks the stored role
+// — it never trusts a role string or a user id from the client.
+// Every mutating endpoint below calls requireRole() first, so
+// hiding a button in React is not the only protection: a Citizen
+// calling POST /api/users or a Staff user calling the status
+// endpoint gets 403 from the API. Missing/expired token -> 401.
+//
+// Honest limit: tokens are random strings stored in SQLite, not
+// signed JWTs, and passwords are salted SHA-256 (not bcrypt). That
+// is real login for this project, but a production system would use
+// bcrypt/argon2 + signed tokens + HTTPS. Reads of single complaints
+// by tracking code stay public by design (a citizen tracks with
+// just the code); the users list now needs a login.
+// ------------------------------------------------------------------
+static bool requireRole(Database& db, int actorId, UserRole wanted,
+                        const std::string& action, Response& out) {
+    if (actorId <= 0) {
+        out = {401, errorJson("Login required: send Authorization: Bearer <token>")};
+        return false;
+    }
+    User actor;
+    if (!userExists(db, actorId, &actor)) {
+        out = {401, errorJson("Invalid or expired login token")};
+        return false;
+    }
+    if (actor.role != wanted) {
+        out = {403, errorJson("Only " + toString(wanted) + " users can " + action)};
+        return false;
+    }
+    return true;
+}
 
 static Response handleRequest(Database& db, const std::string& method,
                               const std::string& path,
                               const std::map<std::string, std::string>& query,
-                              const std::string& body) {
+                              const std::string& body, int actorId = 0,
+                              const std::string& authToken = "") {
     std::vector<std::string> p = splitPath(path);
     auto bad = [](const std::string& msg) { return Response{400, errorJson(msg)}; };
 
@@ -327,16 +613,81 @@ static Response handleRequest(Database& db, const std::string& method,
     if (method == "GET" && p.size() == 2 && p[0] == "api" && p[1] == "areas")
         return {200, listJson<Area>(db.getAllAreas(), areaJson)};
 
+    // POST /api/auth/register, POST /api/auth/login,
+    // GET /api/auth/me, POST /api/auth/logout
+    if (p.size() == 3 && p[0] == "api" && p[1] == "auth" && p[2] == "register") {
+        if (method != "POST") return {404, errorJson("Not found")};
+        User u;
+        std::string password;
+        if (!jsonGetString(body, "fullName", u.fullName) || u.fullName.empty())
+            return bad("fullName is required");
+        if (!jsonGetString(body, "email", u.email) || u.email.empty())
+            return bad("email is required");
+        if (!jsonGetString(body, "password", password) || password.size() < 6)
+            return bad("password is required (at least 6 characters)");
+        jsonGetString(body, "phone", u.phone);
+        if (!jsonGetInt(body, "areaId", u.areaId)) u.areaId = 1;
+        u.role = UserRole::Citizen;  // self-registration is Citizen only
+        u.isActive = true;
+        User existing;
+        if (db.getUserByEmail(u.email, existing))
+            return {409, errorJson("An account with this email already exists")};
+        u.passwordHash = hashPassword(password);
+        if (!db.insertUser(u)) return {500, errorJson("Could not create account")};
+        User created;
+        if (!db.getUserByEmail(u.email, created)) return {500, errorJson("Account created but could not be read back")};
+        std::string token = randomHex(32);
+        if (!db.createSession(created.id, token, expiryIn24h())) return {500, errorJson("Could not start session")};
+        return {201, "{\"user\":" + userJson(created) + ",\"token\":" + jsonStr(token) + "}"};
+    }
+    if (p.size() == 3 && p[0] == "api" && p[1] == "auth" && p[2] == "login") {
+        if (method != "POST") return {404, errorJson("Not found")};
+        std::string email, password;
+        if (!jsonGetString(body, "email", email) || !jsonGetString(body, "password", password))
+            return bad("email and password are required");
+        User u;
+        // Same message whether the email or the password is wrong,
+        // so a login failure does not reveal which accounts exist.
+        if (!db.getUserByEmail(email, u) || u.passwordHash.empty() || !verifyPassword(password, u.passwordHash))
+            return {401, errorJson("Invalid email or password")};
+        if (!u.isActive) return {401, errorJson("This account is disabled")};
+        std::string token = randomHex(32);
+        if (!db.createSession(u.id, token, expiryIn24h())) return {500, errorJson("Could not start session")};
+        return {200, "{\"user\":" + userJson(u) + ",\"token\":" + jsonStr(token) + "}"};
+    }
+    if (p.size() == 3 && p[0] == "api" && p[1] == "auth" && p[2] == "me") {
+        if (method != "GET") return {404, errorJson("Not found")};
+        if (actorId <= 0) return {401, errorJson("Login required: send Authorization: Bearer <token>")};
+        User u;
+        if (!userExists(db, actorId, &u)) return {401, errorJson("Invalid or expired login token")};
+        return {200, userJson(u)};
+    }
+    if (p.size() == 3 && p[0] == "api" && p[1] == "auth" && p[2] == "logout") {
+        if (method != "POST") return {404, errorJson("Not found")};
+        if (actorId <= 0) return {401, errorJson("Login required: send Authorization: Bearer <token>")};
+        db.deleteSession(authToken);
+        return {200, "{\"loggedOut\":true}"};
+    }
+
     // GET /api/users, POST /api/users
     if (p.size() == 2 && p[0] == "api" && p[1] == "users") {
-        if (method == "GET")
+        if (method == "GET") {
+            if (actorId <= 0) return {401, errorJson("Login required: send Authorization: Bearer <token>")};
             return {200, listJson<User>(db.getAllUsers(), userJson)};
+        }
         if (method == "POST") {
+            Response denied;
+            if (!requireRole(db, actorId, UserRole::Admin, "create users (add staff)", denied))
+                return denied;
             User u;
+            std::string password;
             if (!jsonGetString(body, "fullName", u.fullName) || u.fullName.empty())
                 return bad("fullName is required");
             if (!jsonGetString(body, "email", u.email) || u.email.empty())
                 return bad("email is required");
+            if (!jsonGetString(body, "password", password) || password.size() < 6)
+                return bad("password is required (at least 6 characters)");
+            u.passwordHash = hashPassword(password);
             jsonGetString(body, "phone", u.phone);
             std::string roleStr;
             if (jsonGetString(body, "role", roleStr)) {
@@ -384,8 +735,13 @@ static Response handleRequest(Database& db, const std::string& method,
             return {200, listJson<Complaint>(all, complaintJson)};
         }
         if (method == "POST") {
+            Response denied;
+            if (!requireRole(db, actorId, UserRole::Citizen, "submit complaints", denied))
+                return denied;
             Complaint c;
             if (!jsonGetInt(body, "citizenId", c.citizenId)) return bad("citizenId is required");
+            if (c.citizenId != actorId)
+                return {403, errorJson("A citizen can only submit complaints as themselves")};
             if (!jsonGetString(body, "title", c.title) || c.title.empty()) return bad("title is required");
             if (!jsonGetString(body, "description", c.description) || c.description.empty()) return bad("description is required");
             std::string catStr;
@@ -395,6 +751,15 @@ static Response handleRequest(Database& db, const std::string& method,
             if (c.priorityScore < 1 || c.priorityScore > 5) return bad("priorityScore must be 1-5");
             if (!jsonGetInt(body, "areaId", c.areaId)) return bad("areaId is required");
             if (!userExists(db, c.citizenId)) return bad("citizenId does not exist");
+            // Optional map location + photo, added 5 Nov 2026.
+            jsonGetDouble(body, "latitude", c.latitude);
+            jsonGetDouble(body, "longitude", c.longitude);
+            if ((c.latitude != 0 && (c.latitude < -90 || c.latitude > 90)) ||
+                (c.longitude != 0 && (c.longitude < -180 || c.longitude > 180)))
+                return bad("latitude must be -90..90 and longitude -180..180");
+            std::string photoB64, photoExt;
+            bool hasPhoto = jsonGetString(body, "photoBase64", photoB64) && !photoB64.empty();
+            if (hasPhoto) jsonGetString(body, "photoExt", photoExt);
             int maxSuffix = 100;
             for (const Complaint& existing : db.getAllComplaints()) {
                 if (existing.trackingCode.rfind("CFX-", 0) == 0) {
@@ -406,16 +771,59 @@ static Response handleRequest(Database& db, const std::string& method,
             }
             c.trackingCode = "CFX-" + std::to_string(maxSuffix + 1);
             c.photoPath = "";
+            if (hasPhoto) {
+                std::string saved;
+                if (!savePhoto(photoB64, photoExt, c.trackingCode, saved))
+                    return bad("photo must be a JPG or PNG under 5 MB");
+                c.photoPath = saved;
+            }
             c.status = ComplaintStatus::Submitted;
             c.createdAt = nowTimestamp();
             c.updatedAt = c.createdAt;
             if (!db.insertComplaint(c)) return {500, errorJson("Could not submit complaint")};
             Complaint created;
             if (!db.getComplaintByTrackingCode(c.trackingCode, created)) return {500, errorJson("Complaint saved but could not be read back")};
+            // C++ -> ML: text category first, then image detection if
+            // a photo was uploaded. ML being down never blocks the
+            // complaint — the AI fields simply stay empty.
+            {
+                std::string aiCat;
+                double aiConf = 0.0;
+                if (mlPredictText(created.title + ". " + created.description, aiCat, aiConf)) {
+                    std::string imgLabel;
+                    double imgConf = 0.0;
+                    std::string imgCat;
+                    if (!created.photoPath.empty() &&
+                        mlDetectImage(created.photoPath, imgCat, imgConf, imgLabel)) {
+                        db.updateComplaintAi(created.id, aiCat, aiConf, imgLabel);
+                    } else {
+                        db.updateComplaintAi(created.id, aiCat, aiConf, "");
+                    }
+                    db.getComplaintByTrackingCode(c.trackingCode, created);
+                } else if (!created.photoPath.empty()) {
+                    std::string imgLabel, imgCat;
+                    double imgConf = 0.0;
+                    if (mlDetectImage(created.photoPath, imgCat, imgConf, imgLabel))
+                        db.updateComplaintAi(created.id, imgCat, imgConf, imgLabel);
+                    db.getComplaintByTrackingCode(c.trackingCode, created);
+                }
+            }
             return {201, complaintJson(created)};
         }
     }
 
+    // GET /uploads/<file> — serve a saved complaint photo.
+    if (method == "GET" && p.size() == 2 && p[0] == "uploads") {
+        std::string file = p[1];
+        if (file.find("..") != std::string::npos || file.find('/') != std::string::npos ||
+            file.find('\\') != std::string::npos)
+            return bad("Invalid file name");
+        std::ifstream in("uploads/" + file, std::ios::binary);
+        if (!in) return {404, errorJson("Photo not found")};
+        std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        std::string ct = (file.size() >= 4 && file.substr(file.size() - 4) == ".png") ? "image/png" : "image/jpeg";
+        return {200, bytes, ct};
+    }
     // GET /api/complaints/track/{code}
     if (method == "GET" && p.size() == 4 && p[0] == "api" && p[1] == "complaints" && p[2] == "track") {
         Complaint c;
@@ -431,17 +839,49 @@ static Response handleRequest(Database& db, const std::string& method,
             if (!db.getComplaintById(id, c)) return {404, errorJson("Complaint not found")};
             return {200, complaintJson(c)};
         }
+        if (method == "POST" && p.size() == 4 && p[3] == "photo") {
+            Response denied;
+            if (!requireRole(db, actorId, UserRole::Citizen, "add photos to complaints", denied))
+                return denied;
+            Complaint current;
+            if (!db.getComplaintById(id, current)) return {404, errorJson("Complaint not found")};
+            if (current.citizenId != actorId)
+                return {403, errorJson("A citizen can only add photos to their own complaints")};
+            std::string photoB64, photoExt;
+            if (!jsonGetString(body, "photoBase64", photoB64) || photoB64.empty())
+                return bad("photoBase64 is required");
+            jsonGetString(body, "photoExt", photoExt);
+            std::string saved;
+            if (!savePhoto(photoB64, photoExt, current.trackingCode, saved))
+                return bad("photo must be a JPG or PNG under 5 MB");
+            if (!db.updateComplaintPhoto(id, saved)) return {500, errorJson("Could not save photo")};
+            std::string imgCat, imgLabel;
+            double imgConf = 0.0;
+            if (mlDetectImage(saved, imgCat, imgConf, imgLabel)) {
+                std::string keepCat = current.aiSuggestedCategory.empty() ? imgCat : current.aiSuggestedCategory;
+                double keepConf = current.aiSuggestedCategory.empty() ? imgConf : current.aiConfidence;
+                db.updateComplaintAi(id, keepCat, keepConf, imgLabel);
+            }
+            Complaint updated;
+            db.getComplaintById(id, updated);
+            return {200, complaintJson(updated)};
+        }
         if (method == "GET" && p.size() == 4 && p[3] == "history") {
             Complaint c;
             if (!db.getComplaintById(id, c)) return {404, errorJson("Complaint not found")};
             return {200, listJson<StatusUpdate>(db.getComplaintHistory(id), historyJson)};
         }
         if ((method == "PATCH" || method == "PUT") && p.size() == 4 && p[3] == "status") {
+            Response denied;
+            if (!requireRole(db, actorId, UserRole::Admin, "change complaint status", denied))
+                return denied;
             std::string statusStr;
             int changedBy = 0;
             std::string notes;
             if (!jsonGetString(body, "newStatus", statusStr)) return bad("newStatus is required");
             if (!jsonGetInt(body, "changedByUserId", changedBy)) return bad("changedByUserId is required");
+            if (changedBy != actorId)
+                return {403, errorJson("changedByUserId must match the acting user")};
             jsonGetString(body, "notes", notes);
             ComplaintStatus newStatus;
             if (!parseStatus(statusStr, newStatus)) return bad("Invalid newStatus");
@@ -461,10 +901,15 @@ static Response handleRequest(Database& db, const std::string& method,
 
     // POST /api/assignments
     if (method == "POST" && p.size() == 2 && p[0] == "api" && p[1] == "assignments") {
+        Response denied;
+        if (!requireRole(db, actorId, UserRole::Admin, "assign complaints to staff", denied))
+            return denied;
         int complaintId = 0, staffId = 0, assignedBy = 0;
         if (!jsonGetInt(body, "complaintId", complaintId)) return bad("complaintId is required");
         if (!jsonGetInt(body, "staffId", staffId)) return bad("staffId is required");
         if (!jsonGetInt(body, "assignedByAdminId", assignedBy)) return bad("assignedByAdminId is required");
+        if (assignedBy != actorId)
+            return {403, errorJson("assignedByAdminId must match the acting user")};
         Complaint c;
         if (!db.getComplaintById(complaintId, c)) return {404, errorJson("Complaint not found")};
         User staff;
@@ -489,9 +934,14 @@ static Response handleRequest(Database& db, const std::string& method,
         }
     }
     if (method == "POST" && p.size() == 3 && p[0] == "api" && p[1] == "admin" && p[2] == "undo") {
+        Response denied;
+        if (!requireRole(db, actorId, UserRole::Admin, "undo admin actions", denied))
+            return denied;
         int changedBy = 0;
         std::string notes;
         if (!jsonGetInt(body, "changedByUserId", changedBy)) return bad("changedByUserId is required");
+        if (changedBy != actorId)
+            return {403, errorJson("changedByUserId must match the acting user")};
         jsonGetString(body, "notes", notes);
         AdminAction latest;
         if (!db.getLatestAdminAction(latest))
@@ -558,6 +1008,8 @@ static std::string statusText(int code) {
         case 200: return "OK";
         case 201: return "Created";
         case 400: return "Bad Request";
+        case 401: return "Unauthorized";
+        case 403: return "Forbidden";
         case 404: return "Not Found";
         case 409: return "Conflict";
         case 500: return "Internal Server Error";
@@ -567,7 +1019,7 @@ static std::string statusText(int code) {
 
 static void sendResponse(socket_t client, const Response& res) {
     std::string header = "HTTP/1.1 " + std::to_string(res.code) + " " + statusText(res.code) +
-        "\r\nContent-Type: application/json\r\nContent-Length: " + std::to_string(res.body.size()) +
+        "\r\nContent-Type: " + res.contentType + "\r\nContent-Length: " + std::to_string(res.body.size()) +
         "\r\nConnection: close\r\n\r\n";
     std::string all = header + res.body;
     size_t sent = 0;
@@ -589,9 +1041,45 @@ static std::string readRequest(socket_t client) {
     }
     size_t headerEnd = data.find("\r\n\r\n");
     if (headerEnd == std::string::npos) return data;
-    size_t contentLength = 0;
     std::string headers = data.substr(0, headerEnd);
-    size_t cl = headers.find("Content-Length:");
+    std::string lowerHeaders = headers;
+    for (char& c : lowerHeaders) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    size_t bodyStart = headerEnd + 4;
+    // Chunked transfer encoding: Vite's dev proxy sends large
+    // bodies (e.g. a photo upload) this way. Decode the chunks
+    // into a plain body, so the rest of the server sees normal JSON.
+    if (lowerHeaders.find("transfer-encoding:") != std::string::npos &&
+        lowerHeaders.find("chunked") != std::string::npos) {
+        std::string decoded;
+        std::string rest = data.substr(bodyStart);
+        while (true) {
+            size_t lineEnd = rest.find("\r\n");
+            while (lineEnd == std::string::npos) {
+                int n = recv(client, buf, sizeof(buf), 0);
+                if (n <= 0) break;
+                rest.append(buf, n);
+                lineEnd = rest.find("\r\n");
+            }
+            if (lineEnd == std::string::npos) break;
+            size_t chunkSize = 0;
+            try { chunkSize = std::stoul(rest.substr(0, lineEnd), nullptr, 16); } catch (...) { break; }
+            rest = rest.substr(lineEnd + 2);
+            if (chunkSize == 0) break;
+            while (rest.size() < chunkSize + 2) {
+                int n = recv(client, buf, sizeof(buf), 0);
+                if (n <= 0) break;
+                rest.append(buf, n);
+            }
+            if (rest.size() < chunkSize) break;
+            decoded.append(rest.substr(0, chunkSize));
+            rest = rest.substr(chunkSize + 2);
+            if (decoded.size() > 8 * 1024 * 1024) break;
+        }
+        return headers + "\r\n\r\n" + decoded;
+    }
+    // Header names are case-insensitive; proxies may lowercase them.
+    size_t contentLength = 0;
+    size_t cl = lowerHeaders.find("content-length:");
     if (cl != std::string::npos) {
         size_t start = cl + 15;
         while (start < headers.size() && !std::isdigit(static_cast<unsigned char>(headers[start]))) start++;
@@ -599,7 +1087,6 @@ static std::string readRequest(socket_t client) {
         while (end < headers.size() && std::isdigit(static_cast<unsigned char>(headers[end]))) end++;
         if (end > start) contentLength = static_cast<size_t>(std::stoul(headers.substr(start, end - start)));
     }
-    size_t bodyStart = headerEnd + 4;
     while (data.size() - bodyStart < contentLength) {
         int n = recv(client, buf, sizeof(buf), 0);
         if (n <= 0) break;
@@ -625,6 +1112,7 @@ int main(int argc, char* argv[]) {
 
     Database db;
     if (!db.connect(dbPath)) return 1;
+    seedDefaultPasswords(db);
 
     socket_t serverSocket = socket(AF_INET, SOCK_STREAM, 0);
     if (serverSocket == SOCKET_INVALID) {
@@ -687,9 +1175,34 @@ int main(int argc, char* argv[]) {
                 start = amp + 1;
             }
         }
+        // Auth identity: "Authorization: Bearer <token>". The token
+        // is looked up in the sessions table — a user id sent by the
+        // client on its own is never trusted any more. 0 = no valid
+        // token, which mutating endpoints reject with 401.
+        int actorId = 0;
+        std::string authToken;
+        {
+            size_t headerEnd2 = raw.find("\r\n\r\n");
+            std::string headersPart = headerEnd2 == std::string::npos ? raw : raw.substr(0, headerEnd2);
+            std::string lowerHeaders = headersPart;
+            for (char& c : lowerHeaders) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            size_t pos = lowerHeaders.find("authorization:");
+            if (pos != std::string::npos) {
+                size_t start = pos + 14;
+                while (start < headersPart.size() && headersPart[start] == ' ') start++;
+                size_t lineEnd = headersPart.find("\r\n", start);
+                std::string value = headersPart.substr(start, lineEnd == std::string::npos ? std::string::npos : lineEnd - start);
+                const std::string bearer = "Bearer ";
+                if (value.rfind(bearer, 0) == 0) {
+                    authToken = value.substr(bearer.size());
+                    User actor;
+                    if (db.getSessionUser(authToken, actor)) actorId = actor.id;
+                }
+            }
+        }
         Response res = {400, errorJson("Bad request")};
         if (!method.empty() && !path.empty())
-            res = handleRequest(db, method, path, query, body);
+            res = handleRequest(db, method, path, query, body, actorId, authToken);
         std::cout << method << " " << target << " -> " << res.code << "\n";
         sendResponse(client, res);
         CLOSE_SOCKET(client);

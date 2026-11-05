@@ -10,6 +10,22 @@
 //   - In a production build with no override, the default is
 //     http://localhost:8080 (see README.md for the CORS note).
 
+// Auth (real login, added 5 Nov 2026): after logging in at
+// POST /api/auth/login the server returns a token, stored in
+// localStorage. Every request sends it as
+// "Authorization: Bearer <token>"; the C++ server looks the token
+// up in the sessions table and enforces the stored role
+// server-side. No user id or role from the browser is trusted.
+// Tokens expire after 24 hours; logging out deletes the token
+// on the server and here.
+const TOKEN_KEY = 'civicfix_token'
+export function getAuthToken() { return localStorage.getItem(TOKEN_KEY) }
+export function setAuthToken(token) {
+  if (token) localStorage.setItem(TOKEN_KEY, token)
+  else localStorage.removeItem(TOKEN_KEY)
+}
+export function clearAuthToken() { localStorage.removeItem(TOKEN_KEY) }
+
 const configured = import.meta.env.VITE_API_URL
 const API_BASE = configured !== undefined
   ? configured
@@ -25,7 +41,11 @@ export async function api(endpoint, options = {}) {
   let response
   try {
     response = await fetch(apiUrl(endpoint), {
-      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(getAuthToken() ? { Authorization: `Bearer ${getAuthToken()}` } : {}),
+        ...(options.headers || {}),
+      },
       ...options,
     })
   } catch (err) {
@@ -40,7 +60,9 @@ export async function api(endpoint, options = {}) {
   }
   if (!response.ok) {
     // The C++ API returns {"error": "..."} — show that message, not a generic one.
-    throw new Error((data && data.error) || `API request failed (${response.status})`)
+    const err = new Error((data && data.error) || `API request failed (${response.status})`)
+    err.status = response.status
+    throw err
   }
   return data
 }

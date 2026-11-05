@@ -19,6 +19,8 @@ database/test_civicfix.db
 
 # Frontend dependencies and build output
 frontend/node_modules/
+# Uploaded complaint photos (created at runtime by the API, not source).
+uploads/
 frontend/dist/
 frontend/.vite/
 
