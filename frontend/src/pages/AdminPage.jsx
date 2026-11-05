@@ -335,7 +335,7 @@ export default function AdminPage({ currentUser, users, areas = [], onUsersChang
                 <div className="bar-track"><div className={`bar-fill ${barColor(i)}`} style={{ width: `${allComplaints.length ? (a.count / allComplaints.length) * 100 : 0}%` }} /></div>
               </div>
             ))}
-            <p className="small">Areas come from the areas table; counts are real complaints in each area. There is no map yet because the database has no coordinates — this is the honest substitute, not a fake map.</p>
+            <p className="small">Areas come from the areas table; counts are real complaints in each area. The map above shows every complaint that was submitted with a location pin.</p>
           </div>
           <div className="card">
             <h2>Recent activity</h2>
