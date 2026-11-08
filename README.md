@@ -147,6 +147,7 @@ tracking, staff queue, admin dashboard and map, assignments, status
 changes with undo, audit trail, and category suggestions from text
 and photos.
 
+<<<<<<< HEAD
 **Security (8 Nov 2026):** every read endpoint now needs a login,
 and a citizen only ever sees their own complaints — staff and admin
 see the full picture, citizens and staff see names without emails or
@@ -184,6 +185,10 @@ mid-session returns to the login page instead of erroring on
 every action.
 
 Still to do before public use: change the demo passwords, and
+=======
+Still to do before public use: change the demo passwords, add
+CORS headers (or keep the Vite proxy) for a deployed frontend, and
+>>>>>>> 1f711aa1698667f18555ce5c2a74bd03c4f55755
 a hosted deployment — see `documentation/DEPLOYMENT.md`. The photo
 categorisation is a general-purpose image classifier used as a
 routing hint, not a model trained on civic photos, so low-confidence
