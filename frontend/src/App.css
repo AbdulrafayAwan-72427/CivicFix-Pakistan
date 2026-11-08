@@ -63,23 +63,15 @@ body {
   height: 100vh;
 }
 .brand { display: flex; align-items: center; gap: 12px; }
-.brand h1 { color: var(--ink); }
-.brand p { color: var(--muted) !important; }
-.brand-mark {
-  width: 44px; height: 44px; border-radius: 12px;
-  background: var(--green-600); color: #fff;
-  display: grid; place-items: center;
-  font-weight: 800; font-size: 1.1rem; letter-spacing: -0.02em;
-}
 /* Confirmed logo (Option 3, CF Monogram, 5 Nov 2026): the image in
    frontend/public/logo.webp replaces the old CF text box. */
 .brand-logo { width: 44px; height: 44px; border-radius: 12px; object-fit: cover; flex-shrink: 0; }
-.brand h1 { margin: 0; font-size: 1.25rem; line-height: 1.1; }
-.brand p { margin: 2px 0 0; font-size: 0.8rem; color: #b7d4c8; }
+.brand-title { margin: 0; font-size: 1.25rem; line-height: 1.1; font-weight: 700; color: var(--ink); }
+.brand p { margin: 2px 0 0; font-size: 0.8rem; color: var(--muted); }
 
 .nav-label {
   font-size: 0.7rem; letter-spacing: 0.12em; text-transform: uppercase;
-  color: #94a3b8; margin: 12px 8px 4px;
+  color: #5b6b64; margin: 12px 8px 4px;
 }
 .nav-label:first-child { margin-top: 0; }
 .nav { display: flex; flex-direction: column; gap: 4px; }
@@ -111,9 +103,10 @@ body {
   justify-content: space-between;
   padding: 22px 28px 0;
 }
-.topbar h2 { margin: 0; font-size: 1.6rem; letter-spacing: -0.02em; }
+.topbar h1 { margin: 0; font-size: 1.6rem; letter-spacing: -0.02em; }
 .topbar p { margin: 4px 0 0; color: var(--muted); }
 .topbar-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.topbar-user { align-self: center; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .pill {
   display: inline-flex; align-items: center; gap: 6px;
@@ -159,6 +152,8 @@ input, select, textarea, button {
   border: 1px solid #cbd5cf; background: #fff; color: var(--ink);
 }
 input:focus, select:focus, textarea:focus { outline: 2px solid var(--green-600); outline-offset: 1px; border-color: var(--green-600); }
+/* Keyboard users must always see where they are — not just in fields. */
+:focus-visible { outline: 2px solid var(--green-600); outline-offset: 2px; border-radius: 4px; }
 button {
   background: var(--green-800); color: #fff; border: 1px solid var(--green-800);
   cursor: pointer; font-weight: 700;
@@ -184,9 +179,11 @@ button.small { padding: 7px 12px; font-size: 0.88rem; }
   width: 42px; height: 42px; border-radius: 12px; flex-shrink: 0;
   display: grid; place-items: center; font-size: 1.2rem;
 }
+/* Colour means something: green = good/resolved, amber = needs
+   attention, slate = neutral counts, red = problems. */
 .stat-icon.green { background: var(--green-100); }
 .stat-icon.amber { background: var(--amber-soft); }
-.stat-icon.blue { background: #dbeafe; }
+.stat-icon.slate { background: #e2e8f0; }
 .stat-icon.red { background: #fdecea; }
 .stat strong { display: block; font-size: 1.55rem; line-height: 1.1; letter-spacing: -0.02em; }
 .stat span { color: var(--muted); font-size: 0.88rem; }
@@ -207,10 +204,12 @@ button.small { padding: 7px 12px; font-size: 0.88rem; }
 .bar-row .bar-head span:last-child { color: var(--muted); font-weight: 700; }
 .bar-track { height: 8px; background: #e9efeb; border-radius: 999px; overflow: hidden; }
 .bar-fill { height: 100%; background: var(--green-600); border-radius: 999px; }
+.bar-fill.green { background: var(--green-600); }
 .bar-fill.amber { background: var(--amber); }
 .bar-fill.blue { background: #2563eb; }
 .bar-fill.red { background: #dc2626; }
 .bar-fill.purple { background: #7c3aed; }
+.bar-fill.slate { background: #94a3b8; }
 
 /* ---------- Tables and badges ---------- */
 .table-wrap { overflow-x: auto; }
@@ -257,12 +256,18 @@ tbody tr:hover { background: var(--green-50); }
 @media (max-width: 900px) {
   .app-shell { flex-direction: column; }
   .sidebar { width: 100%; height: auto; position: static; flex-direction: row; flex-wrap: wrap; align-items: center; }
-  .sidebar-user { margin-top: 0; width: 100%; }
+  /* The user is already shown in the top bar, so the sidebar copy
+     does not need to take up a full row on a phone. */
+  .sidebar-user { display: none; }
   .nav { flex-direction: row; flex-wrap: wrap; }
-  .nav-label { display: none; }
+  /* Group labels stay visible so the buttons keep their structure;
+     each label starts a new row. */
+  .nav-label { width: 100%; margin: 8px 8px 0; }
   .topbar, .content { padding-left: 16px; padding-right: 16px; }
   .grid-2, .grid-main-side { grid-template-columns: 1fr; }
-  table { min-width: 0; }
+  /* Tables keep their horizontal scroll — never crush the columns. */
+  .table-wrap { -webkit-overflow-scrolling: touch; }
+  .topbar-user { max-width: 160px; }
 }
 
 /* ---------- Second wave: search, stepper, timeline, pagination ----------
@@ -270,7 +275,10 @@ tbody tr:hover { background: var(--green-50); }
    search, a visual progress indicator, a history timeline, export,
    and pagination — all from data the API already returns. */
 .card { transition: box-shadow 0.15s ease, transform 0.15s ease; }
-.card:hover { box-shadow: 0 2px 6px rgba(10, 53, 39, 0.10), 0 8px 20px rgba(10, 53, 39, 0.07); }
+/* Hover lift only on cards that are actually interactive — a lift
+   on a plain card tells the user it is clickable when it is not. */
+.card.interactive { cursor: pointer; }
+.card.interactive:hover { box-shadow: 0 2px 6px rgba(10, 53, 39, 0.10), 0 8px 20px rgba(10, 53, 39, 0.07); }
 .search-input { min-width: 240px; }
 .search-input:focus { outline: 2px solid var(--green-600); }
 
@@ -289,10 +297,15 @@ tbody tr:hover { background: var(--green-50); }
 .pagination { display: flex; gap: 10px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
 .pagination span { color: var(--muted); font-size: 0.9rem; }
 
-.detail-panel { border: 2px solid var(--green-600); }
-.detail-panel .card { border: 0; box-shadow: none; margin: 0; padding: 0; }
-.clickable { cursor: pointer; color: var(--green-800); text-decoration: underline; text-underline-offset: 2px; }
-.clickable:hover { color: var(--green-600); }
+/* Table cells that open a complaint are real buttons, so keyboard
+   users can Tab to them and press Enter — a clickable <span> could
+   not do that. */
+.link-cell {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  color: var(--green-800); font: inherit; text-align: left;
+  text-decoration: underline; text-underline-offset: 2px;
+}
+.link-cell:hover { background: none; color: var(--green-600); }
 .refresh-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 
 /* Login page (real login, 5 Nov 2026) */
@@ -300,3 +313,108 @@ tbody tr:hover { background: var(--green-50); }
 .login-card { width: 100%; max-width: 420px; padding: 28px; }
 .link-btn { background: none; border: none; color: #0b6e3f; font-weight: 600; cursor: pointer; padding: 0; font-size: inherit; }
 .link-btn:hover { text-decoration: underline; }
+
+/* ---------- P0 fixes (8 Nov 2026) ---------- */
+/* Classes the JSX already used but the stylesheet never defined, so
+   the login form and the progress stepper fell back to unstyled
+   defaults. */
+.form-grid { display: flex; flex-direction: column; gap: 12px; max-width: 100%; }
+.btn, .btn-primary {
+  background: var(--green-800); color: #fff; border: 1px solid var(--green-800);
+  font-weight: 700; cursor: pointer;
+}
+.btn:hover, .btn-primary:hover { background: var(--green-600); border-color: var(--green-600); }
+.btn-primary { width: 100%; padding: 12px; }
+.step-label { font-size: 0.85rem; font-weight: 600; line-height: 1.2; }
+.step.current .step-label { color: #fff; }
+.step.done .step-label { color: var(--green-800); }
+/* The stepper is now a real <ol> (P0-8); keep it looking the same. */
+.stepper { list-style: none; padding: 0; }
+
+/* Screen-reader-only text (stepper state announcements, P0-8). */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+
+/* Initial loading screen (P0-7): a spinner instead of a bare line. */
+.loading-screen {
+  display: flex; flex-direction: column; gap: 14px;
+  align-items: center; justify-content: center; min-height: 100vh;
+}
+.spinner {
+  width: 34px; height: 34px; border-radius: 50%;
+  border: 3px solid var(--green-100); border-top-color: var(--green-600);
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+
+/* ---------- P1/P2 fixes (8 Nov 2026) ---------- */
+/* Spacing + layout utilities, replacing the most repeated inline styles. */
+.mb-16 { margin-bottom: 16px; }
+.mt-0 { margin-top: 0; }
+.mt-12 { margin-top: 12px; }
+.mt-16 { margin-top: 16px; }
+.card-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+
+/* Loading skeletons (P1-2): lists show these while fetching, so
+   "loading" and "empty" never look the same. */
+.skeleton-list { display: flex; flex-direction: column; gap: 10px; }
+.skeleton-row {
+  height: 58px; border-radius: 12px;
+  background: linear-gradient(90deg, #eef2ef 25%, #f6f9f7 37%, #eef2ef 63%);
+  background-size: 400% 100%;
+  animation: shimmer 1.4s ease infinite;
+}
+@keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
+
+/* Admin section tabs (P1-6). */
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; flex-wrap: wrap; }
+.tab {
+  background: none; border: 0; border-bottom: 2px solid transparent;
+  padding: 10px 14px; color: var(--muted); font-weight: 600; cursor: pointer;
+  border-radius: 0;
+}
+.tab:hover { color: var(--ink); background: transparent; }
+.tab.active { color: var(--green-800); border-bottom-color: var(--green-600); }
+
+/* Complaint detail drawer (P1-7): slides in from the right so the
+   table stays visible behind it. */
+.drawer-backdrop { position: fixed; inset: 0; background: rgba(10, 53, 39, 0.35); z-index: 890; }
+.drawer {
+  position: fixed; top: 0; right: 0; height: 100vh; width: min(560px, 92vw);
+  background: #fff; border-left: 1px solid var(--border);
+  box-shadow: -8px 0 24px rgba(10, 53, 39, 0.12);
+  overflow-y: auto; padding: 20px; z-index: 900;
+  animation: drawer-in 0.2s ease;
+}
+@keyframes drawer-in { from { transform: translateX(20px); opacity: 0; } }
+
+/* Shared empty state (P1-16). */
+.empty-state { text-align: center; padding: 40px 20px; color: var(--muted); }
+.empty-icon { font-size: 2.2rem; margin-bottom: 8px; }
+.empty-state strong { display: block; color: var(--ink); margin-bottom: 4px; }
+.empty-state p { margin: 4px 0 0; }
+
+/* Text alternative for the map (P2-13). */
+.map-list { margin-top: 10px; }
+.map-list summary { cursor: pointer; color: var(--green-800); font-weight: 600; font-size: 0.9rem; }
+.map-list ul { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.map-list li { font-size: 0.9rem; }
+
+/* Vertical stepper on phones (P1-17): five steps need 550px side
+   by side, so they stack instead of wrapping into a ragged block. */
+@media (max-width: 600px) {
+  .stepper { flex-direction: column; gap: 2px; }
+  .step { min-width: 0; width: 100%; }
+}
+
+/* Respect reduced-motion everywhere (P2-16). */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

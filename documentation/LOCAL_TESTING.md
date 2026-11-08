@@ -36,7 +36,7 @@ Token as the password, not your GitHub password.
 
 > Do NOT commit a test database you mutated on purpose
 > (`api_test.db`, `test_civicfix.db`) — they are gitignored anyway.
-> Do NOT commit the `dsa-viva/dsa_viva.exe` binary either.
+> Do NOT commit a built binary (`.exe`) either — they are gitignored anyway.
 
 ## 1. Test the C++ API locally (works TODAY — already tested)
 

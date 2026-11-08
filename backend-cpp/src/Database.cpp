@@ -1673,6 +1673,35 @@ bool Database::assignComplaint(int complaintId, int staffId, int assignedByAdmin
     return result == SQLITE_DONE;
 }
 
+std::vector<Complaint> Database::getComplaintsAssignedTo(int staffId) {
+    std::vector<Complaint> assigned;
+    if (db == nullptr) return assigned;
+    // "Currently assigned" = the latest assignment row for the
+    // complaint (nothing ever sets unassigned_at, so the newest row
+    // wins on re-assignment) whose staff is this user and which was
+    // never unassigned. Ordered by assignments.id = assignment order.
+    const char* sql =
+        "SELECT c.id, c.tracking_code, c.citizen_id, c.title, c.description, "
+        "c.category, c.priority_score, c.area_id, c.photo_path, c.status, "
+        "c.created_at, c.updated_at, c.latitude, c.longitude, c.ai_category, "
+        "c.ai_confidence, c.ai_image_label FROM complaints c "
+        "JOIN assignments a ON a.complaint_id = c.id "
+        "WHERE a.staff_id = ? AND a.unassigned_at IS NULL "
+        "AND a.id = (SELECT MAX(a2.id) FROM assignments a2 "
+        "WHERE a2.complaint_id = a.complaint_id) "
+        "ORDER BY a.id;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return assigned;
+    sqlite3_bind_int(stmt, 1, staffId);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        Complaint c;
+        fillComplaintFromRow(stmt, c);
+        assigned.push_back(c);
+    }
+    sqlite3_finalize(stmt);
+    return assigned;
+}
+
 std::vector<AdminAction> Database::getAllAdminActions() {
     std::vector<AdminAction> actions;
     if (db == nullptr) return actions;

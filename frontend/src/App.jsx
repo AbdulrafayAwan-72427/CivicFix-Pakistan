@@ -21,11 +21,16 @@ const PAGES = {
 export default function App() {
   const [tab, setTab] = useState('citizen')
   const [activeNav, setActiveNav] = useState('home')
+  const [adminSection, setAdminSection] = useState('overview')
   const [users, setUsers] = useState([])
   const [areas, setAreas] = useState([])
   const [currentUser, setCurrentUser] = useState(null)
   const [apiOk, setApiOk] = useState(null)
   const [loadError, setLoadError] = useState('')
+  // The API-down banner used to show a Windows-only command to
+  // everyone; show the right one for this machine instead.
+  const isWindows = typeof navigator !== 'undefined' && navigator.userAgent.includes('Windows')
+  const reduceMotion = typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
   // If a token is saved from an earlier visit, check it with the
   // API (GET /api/auth/me). If it is missing or expired, the login
@@ -44,10 +49,21 @@ export default function App() {
       } catch (err) {
         setApiOk(false)
         setLoadError(err.message)
+        console.error('API load failed:', err)
         if (err.status === 401) { clearAuthToken(); setCurrentUser(null) }
       }
     }
     load()
+  }, [])
+
+  // A token can also die mid-session (24-hour expiry, or logged
+  // out elsewhere). api.js fires this event on any 401, so the
+  // app returns to the login page instead of erroring on every
+  // action until the next refresh.
+  useEffect(() => {
+    const onUnauthorized = () => { clearAuthToken(); setCurrentUser(null) }
+    window.addEventListener('civicfix:unauthorized', onUnauthorized)
+    return () => window.removeEventListener('civicfix:unauthorized', onUnauthorized)
   }, [])
 
   const page = PAGES[tab]
@@ -61,6 +77,7 @@ export default function App() {
     const role = (currentUser.role || 'Citizen').toLowerCase()
     if (['citizen', 'admin', 'staff'].includes(role)) setTab(role)
     setActiveNav('home')
+    setAdminSection('overview')
     window.scrollTo({ top: 0 })
   }, [currentUser]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -91,17 +108,26 @@ export default function App() {
   // current role's page.
   function goTo(targetId, navKey) {
     setActiveNav(navKey)
+    const behavior = reduceMotion ? 'auto' : 'smooth'
     let attempts = 0
     const scroll = () => {
       if (targetId) {
         const el = document.getElementById(targetId)
-        if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); return }
+        if (el) { el.scrollIntoView({ behavior, block: 'start' }); return }
         if (attempts < 10) { attempts += 1; setTimeout(scroll, 150) }
       } else {
-        window.scrollTo({ top: 0, behavior: 'smooth' })
+        window.scrollTo({ top: 0, behavior })
       }
     }
     setTimeout(scroll, 100)
+  }
+
+  // Admin sidebar buttons switch the admin tab (Overview /
+  // Complaints / Team / Actions) instead of scrolling.
+  function goAdminSection(sectionKey, navKey) {
+    setAdminSection(sectionKey)
+    setActiveNav(navKey)
+    window.scrollTo({ top: 0, behavior: reduceMotion ? 'auto' : 'smooth' })
   }
 
   // Re-fetch users after Admin creates a staff member, so the new
@@ -113,8 +139,11 @@ export default function App() {
 
   if (apiOk === null && !currentUser) {
     return (
-      <div className="app-shell" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}>
-        <p className="small">Connecting to the API…</p>
+      <div className="app-shell">
+        <div className="loading-screen">
+          <div className="spinner" aria-hidden="true" />
+          <p className="small">Connecting to the service…</p>
+        </div>
       </div>
     )
   }
@@ -126,65 +155,59 @@ export default function App() {
         <div className="brand">
           <img className="brand-logo" src="/logo.webp" alt="CivicFix logo" />
           <div>
-            <h1>CivicFix</h1>
-            <p>Pakistan · City Dashboard</p>
+            <div className="brand-title">CivicFix</div>
+            <p>Lahore, Pakistan</p>
           </div>
         </div>
 
-        <nav className="nav" aria-label="Workspace">
+        <nav className="nav" aria-label="Sections">
           {/* One role only, per the logged-in user. No other role's
               links are rendered at all — they are not just hidden
-              with CSS, they are absent from the page. */}
-          <div className="nav-label">Workspace</div>
-          {tab === 'citizen' && (
-            <button className={`nav-btn ${activeNav === 'home' ? 'active' : ''}`} onClick={() => goTo(null, 'home')}>
-              <span className="nav-icon">👤</span>Citizen
-            </button>
-          )}
-          {tab === 'admin' && (
-            <button className={`nav-btn ${activeNav === 'home' ? 'active' : ''}`} onClick={() => goTo(null, 'home')}>
-              <span className="nav-icon">🛡️</span>Operations Center
-            </button>
-          )}
-          {tab === 'staff' && (
-            <button className={`nav-btn ${activeNav === 'home' ? 'active' : ''}`} onClick={() => goTo(null, 'home')}>
-              <span className="nav-icon">🧑‍🔧</span>Work queue
-            </button>
-          )}
-
-          <div className="nav-label">Operations</div>
+              with CSS, they are absent from the page. Group labels
+              name the sections, not the org chart. */}
           {tab === 'citizen' && (<>
+            <div className="nav-label">Home</div>
+            <button className={`nav-btn ${activeNav === 'home' ? 'active' : ''}`} onClick={() => goTo(null, 'home')}>
+              <span className="nav-icon" aria-hidden="true">👤</span>Citizen
+            </button>
+            <div className="nav-label">My reports</div>
             <button className={`nav-btn ${activeNav === 'submit' ? 'active' : ''}`} onClick={() => goTo('submit-card', 'submit')}>
-              <span className="nav-icon">📝</span>Submit a report
+              <span className="nav-icon" aria-hidden="true">📝</span>Submit a report
             </button>
             <button className={`nav-btn ${activeNav === 'track' ? 'active' : ''}`} onClick={() => goTo('track-card', 'track')}>
-              <span className="nav-icon">🔍</span>Track a report
+              <span className="nav-icon" aria-hidden="true">🔍</span>Track a report
             </button>
             <button className={`nav-btn ${activeNav === 'mine' ? 'active' : ''}`} onClick={() => goTo('my-complaints-card', 'mine')}>
-              <span className="nav-icon">📄</span>My complaints
+              <span className="nav-icon" aria-hidden="true">📄</span>My complaints
             </button>
           </>)}
           {tab === 'staff' && (<>
+            <div className="nav-label">Work</div>
+            <button className={`nav-btn ${activeNav === 'home' ? 'active' : ''}`} onClick={() => goTo(null, 'home')}>
+              <span className="nav-icon" aria-hidden="true">🧑‍🔧</span>Work queue
+            </button>
             <button className={`nav-btn ${activeNav === 'queue' ? 'active' : ''}`} onClick={() => goTo('work-queue-card', 'queue')}>
-              <span className="nav-icon">⏳</span>Work queue
+              <span className="nav-icon" aria-hidden="true">⏳</span>Work queue
             </button>
             <button className={`nav-btn ${activeNav === 'active' ? 'active' : ''}`} onClick={() => goTo('active-complaints-card', 'active')}>
-              <span className="nav-icon">🗂️</span>Active complaints
+              <span className="nav-icon" aria-hidden="true">🗂️</span>Active complaints
             </button>
           </>)}
-          {tab === 'admin' && (
-            <button className={`nav-btn ${activeNav === 'complaints' ? 'active' : ''}`} onClick={() => goTo('complaints-card', 'complaints')}>
-              <span className="nav-icon">🗂️</span>Complaints
-            </button>
-          )}
-
           {tab === 'admin' && (<>
-            <div className="nav-label">Management</div>
-            <button className={`nav-btn ${activeNav === 'team' ? 'active' : ''}`} onClick={() => goTo('team-card', 'team')}>
-              <span className="nav-icon">👥</span>Team
+            <div className="nav-label">Overview</div>
+            <button className={`nav-btn ${activeNav === 'home' ? 'active' : ''}`} onClick={() => goAdminSection('overview', 'home')}>
+              <span className="nav-icon" aria-hidden="true">🛡️</span>Operations Center
             </button>
-            <button className={`nav-btn ${activeNav === 'actions' ? 'active' : ''}`} onClick={() => goTo('admin-actions-card', 'actions')}>
-              <span className="nav-icon">↩️</span>Admin actions
+            <div className="nav-label">Manage</div>
+            <button className={`nav-btn ${activeNav === 'complaints' ? 'active' : ''}`} onClick={() => goAdminSection('complaints', 'complaints')}>
+              <span className="nav-icon" aria-hidden="true">🗂️</span>Complaints
+            </button>
+            <div className="nav-label">Admin</div>
+            <button className={`nav-btn ${activeNav === 'team' ? 'active' : ''}`} onClick={() => goAdminSection('team', 'team')}>
+              <span className="nav-icon" aria-hidden="true">👥</span>Team
+            </button>
+            <button className={`nav-btn ${activeNav === 'actions' ? 'active' : ''}`} onClick={() => goAdminSection('actions', 'actions')}>
+              <span className="nav-icon" aria-hidden="true">↩️</span>Admin actions
             </button>
           </>)}
         </nav>
@@ -198,13 +221,13 @@ export default function App() {
       <div className="main-area">
         <header className="topbar">
           <div>
-            <h2>{page.title}</h2>
+            <h1>{page.title}</h1>
             <p>{page.subtitle}</p>
           </div>
           <div className="topbar-actions">
             {apiOk === true && <span className="pill"><span className="dot" /> API connected</span>}
             {apiOk === false && <span className="pill bad"><span className="dot" /> API not reachable</span>}
-            <span className="small" style={{ alignSelf: 'center' }}>
+            <span className="small topbar-user">
               Logged in as <strong>{currentUser.fullName}</strong> ({currentUser.role})
             </span>
             <button className="btn" type="button" onClick={logout}>Log out</button>
@@ -214,24 +237,16 @@ export default function App() {
         <main className="content">
           {apiOk === false && (
             <div className="banner error">
-              <strong>API is not reachable: {loadError}</strong>{' '}
-              Start the C++ API on port 8080 first, then refresh this page:{' '}
-              <code>backend-cpp\civicfix_api.exe 8080 database\api_test.db</code>
-              <br />
-              <span className="small">Tip: demo logins are admin@civicfix.pk / admin123 and ali@example.com / ali123.</span>
+              <strong>Cannot reach the service.</strong>{' '}
+              The backend is not responding on port 8080. Start it, then refresh:{' '}
+              <code>{isWindows
+                ? 'backend-cpp\\civicfix_api.exe 8080 database\\api_test.db'
+                : './backend-cpp/civicfix_api 8080 database/api_test.db'}</code>
             </div>
-          )}
-          {apiOk === true && (
-            <p className="small" style={{ marginTop: 0 }}>
-              Logged in as {currentUser.fullName} ({currentUser.role}). The sidebar shows only
-              this role's tools, and the API checks the login token's role for every change
-              (status, assignment, staff, undo, new report). Your login stays valid for 24
-              hours; use Log out in the top bar to end it sooner.
-            </p>
           )}
 
           {tab === 'citizen' && <CitizenPage currentUser={currentUser} areas={areas} users={users} />}
-          {tab === 'admin' && <AdminPage currentUser={currentUser} users={users} areas={areas} onUsersChanged={reloadUsers} />}
+          {tab === 'admin' && <AdminPage currentUser={currentUser} users={users} areas={areas} onUsersChanged={reloadUsers} section={adminSection} onSectionChange={setAdminSection} />}
           {tab === 'staff' && <StaffPage areas={areas} users={users} />}
         </main>
       </div>

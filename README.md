@@ -147,8 +147,43 @@ tracking, staff queue, admin dashboard and map, assignments, status
 changes with undo, audit trail, and category suggestions from text
 and photos.
 
-Still to do before public use: change the demo passwords, add
-CORS headers (or keep the Vite proxy) for a deployed frontend, and
+**Security (8 Nov 2026):** every read endpoint now needs a login,
+and a citizen only ever sees their own complaints — staff and admin
+see the full picture, citizens and staff see names without emails or
+phone numbers. Only tracking a complaint by its code stays public,
+and tracking codes are random now (like `CFX-7K3M9P`) instead of
+countable numbers, so nobody can walk through them and read other
+people's reports.
+
+**Interface fixes (8 Nov 2026):** the mobile layout now works
+(the viewport tag was broken, so phones never got it); the login
+form and progress stepper have their proper styling; registering
+lets you pick your area instead of silently putting everyone in
+Gulberg; the loading screen shows a spinner and gives up after 10
+seconds instead of hanging; and the API-down message shows the
+right start command for your computer.
+
+**Interface, second round (8 Nov 2026):** the admin page is split
+into Overview / Complaints / Team / Actions tabs, and a complaint
+opens in a side drawer instead of scrolling you away from the
+table; every list shows a loading state, every action button shows
+it is busy, and success messages dismiss themselves; rejecting or
+undoing asks first; citizens answer "how urgent is this?" in plain
+words instead of picking their own priority number; staff see a
+"My assignments" view of their own work. Logins are also harder to
+attack now: 5 failed attempts lock an email out for 15 minutes,
+and passwords are hashed 10,000 times instead of once (old
+passwords keep working and upgrade automatically on next login).
+
+**Deployment-ready (8 Nov 2026):** the API now sends CORS
+headers and answers preflight requests, so a frontend served from
+any origin can call it directly — no proxy needed for a deployed
+build. The backend also builds with CMake now
+(`backend-cpp/CMakeLists.txt`), and a login that expires
+mid-session returns to the login page instead of erroring on
+every action.
+
+Still to do before public use: change the demo passwords, and
 a hosted deployment — see `documentation/DEPLOYMENT.md`. The photo
 categorisation is a general-purpose image classifier used as a
 routing hint, not a model trained on civic photos, so low-confidence

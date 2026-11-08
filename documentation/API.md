@@ -27,30 +27,68 @@ Trade-offs to know for the viva:
   demo `X-User-Id` header.** `POST /api/auth/register` (Citizen
   only, self-registration) and `POST /api/auth/login` return
   `{"user": {...}, "token": "<64 hex chars>"}`. Passwords are
-  stored as salted SHA-256 (`<salt>$<sha256(salt+password)>`, new
-  `password_hash` column added by migration in
-  `Database::connect`); the API never returns the hash. Every later
-  request sends `Authorization: Bearer <token>`; the server looks
-  the token up in the `sessions` table (24-hour expiry) and checks
-  the stored role. `GET /api/auth/me` returns the logged-in user;
+  stored as iterated salted SHA-256 — 10,000 rounds, format
+  `iter10000$<salt>$<hash>` (new `password_hash` column added by
+  migration in `Database::connect`); the API never returns the
+  hash. Old single-round hashes (`<salt>$<sha256(salt+password)>`)
+  are still accepted, and a successful login upgrades them to the
+  iterated format automatically. Every later request sends
+  `Authorization: Bearer <token>`; the server looks the token up
+  in the `sessions` table (24-hour expiry) and checks the stored
+  role. `GET /api/auth/me` returns the logged-in user;
   `POST /api/auth/logout` deletes the session. Seeded users get
   demo passwords on first run after the upgrade: Admin
   `admin@civicfix.pk` / `admin123`, Citizen `ali@example.com` /
   `ali123`, Staff `staff123` — change them for real use.
   `POST /api/users` (Admin) now needs a `password` (min 6 chars)
   for the new staff member. Missing/expired token → 401, wrong
-  role or mismatched actor → 403. Honest limit: tokens are random
-  strings in SQLite (not signed JWTs) and the hash is salted
-  SHA-256 (not bcrypt/argon2) — real login for this project, but a
-  production system would use bcrypt/argon2 + signed tokens + HTTPS.
+  role or mismatched actor → 403. **Login rate limiting
+  (8 Nov 2026):** 5 failed logins for one email within 15 minutes
+  locks that email out until the window passes (429 "Too many
+  failed login attempts"); a successful login clears the counter.
+  Honest limit: tokens are random strings in SQLite (not signed
+  JWTs) and the hash is iterated SHA-256 (not bcrypt/argon2) —
+  real login for this project, but a production system would use
+  bcrypt/argon2 + signed tokens + HTTPS.
 - **Role-based access control (RBAC) — same rules as before, now
   enforced on the login token instead of a client-sent user id.**
   `POST /api/users`, status changes, assignments and undo are Admin
   only; `POST /api/complaints` and `POST /api/complaints/{id}/photo`
   are Citizen only, and the `citizenId` / `changedByUserId` /
   `assignedByAdminId` in the body must match the logged-in user.
-  `GET /api/users` now needs a login; tracking a complaint by code
-  stays public by design.
+  **Reads are locked down too (8 Nov 2026):** `GET /api/complaints`,
+  `GET /api/complaints/{id}` and `GET /api/complaints/{id}/history`
+  need a login, and a Citizen only ever sees their own complaints
+  (Staff and Admin see all); `GET /api/queue` is Staff or Admin;
+  `GET /api/stats` and `GET /api/admin/actions` are Admin only.
+  `GET /api/users` needs a login, and only Admins get full records
+  (email, phone) — Citizens and Staff get id, name and role only,
+  which is all the frontend needs to show "Submitted by …".
+  `GET /api/me/assignments` (8 Nov 2026) is Staff only and returns
+  the complaints currently assigned to the logged-in staff member,
+  in assignment order — the Staff page's "My assignments" view.
+  **CORS (8 Nov 2026):** every response carries
+  `Access-Control-Allow-Origin: *` plus `Allow-Headers:
+  Content-Type, Authorization` and `Allow-Methods: GET, POST,
+  PATCH, PUT, DELETE, OPTIONS`, and preflight `OPTIONS` requests
+  are answered with 204 — so a frontend served from any origin can
+  call the API directly without a proxy. Demo-grade: any origin
+  may call it. The frontend uses Bearer tokens, not cookies, so a
+  wildcard origin is safe for this setup; a production deployment
+  should restrict the origin list to the domains it serves.
+  **Urgency instead of self-chosen priority (8 Nov 2026):**
+  `POST /api/complaints` accepts `severity` — "low" → priority 2,
+  "normal" → 3, "high" → 5. A valid severity wins over any
+  `priorityScore` in the same body; an invalid value returns 400.
+  Without `severity`, `priorityScore` (1–5, default 3) works as
+  before.
+  Tracking a complaint by code (`GET /api/complaints/track/{code}`)
+  stays public by design, and `GET /api/areas` and `/api/health`
+  stay public too. **Tracking codes are random now** (e.g.
+  `CFX-7K3M9P`, 6 characters, no 0/O/1/I) instead of sequential
+  `CFX-101, 102, …`, so they cannot be counted through on the
+  public tracking endpoint. Old codes (`CFX-101/102/103`) keep
+  working as before.
 
 ## Map, photos and AI (added 5 Nov 2026)
 
@@ -130,22 +168,23 @@ Base URL: `http://localhost:8080`
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| GET | `/api/health` | Health check |
-| GET | `/api/areas` | List areas |
-| GET | `/api/users` | List users |
-| POST | `/api/users` | Register a user (409 if email exists) |
-| GET | `/api/complaints` | List complaints; `?status=`, `?category=`, `?sort=priority` |
-| POST | `/api/complaints` | Submit a complaint; tracking code is auto-generated (CFX-104, …) |
-| GET | `/api/complaints/{id}` | One complaint |
-| GET | `/api/complaints/track/{code}` | Track by code, e.g. CFX-102 |
-| GET | `/api/complaints/{id}/history` | Permanent status history |
-| PATCH or PUT | `/api/complaints/{id}/status` | Change status (validated transition) |
-| POST | `/api/assignments` | Assign a Staff user to a complaint |
-| GET | `/api/admin/actions` | All admin actions, newest first |
-| GET | `/api/admin/actions/latest` | Latest pending (not undone) action |
-| POST | `/api/admin/undo` | Undo the latest pending admin action |
-| GET | `/api/stats` | Dashboard counts: total, resolved, pending, by status, by category |
-| GET | `/api/queue` | Active complaints in FIFO order, via the custom ComplaintQueue |
+| GET | `/api/health` | Health check (public) |
+| GET | `/api/areas` | List areas (public) |
+| GET | `/api/users` | List users (login; Admin sees full records, others id/name/role only) |
+| POST | `/api/users` | Register a user, Admin only (409 if email exists) |
+| GET | `/api/complaints` | List complaints; `?status=`, `?category=`, `?sort=priority` (login; Citizen sees only their own) |
+| POST | `/api/complaints` | Submit a complaint, Citizen only; tracking code is auto-generated and random (e.g. CFX-7K3M9P) |
+| GET | `/api/complaints/{id}` | One complaint (login; Citizen own only) |
+| GET | `/api/complaints/track/{code}` | Track by code, e.g. CFX-102 (public) |
+| GET | `/api/complaints/{id}/history` | Permanent status history (login; Citizen own only) |
+| PATCH or PUT | `/api/complaints/{id}/status` | Change status, Admin only (validated transition) |
+| POST | `/api/assignments` | Assign a Staff user to a complaint, Admin only |
+| GET | `/api/admin/actions` | All admin actions, newest first (Admin only) |
+| GET | `/api/admin/actions/latest` | Latest pending (not undone) action (Admin only) |
+| POST | `/api/admin/undo` | Undo the latest pending admin action, Admin only |
+| GET | `/api/stats` | Dashboard counts: total, resolved, pending, by status, by category (Admin only) |
+| GET | `/api/queue` | Active complaints in FIFO order, via the custom ComplaintQueue (Staff or Admin) |
+| GET | `/api/me/assignments` | Complaints assigned to the logged-in staff member, in assignment order (Staff only) |
 
 ### Status transitions enforced by the API
 

@@ -5,10 +5,12 @@
 //   - Set VITE_API_URL to override it, e.g. VITE_API_URL=http://localhost:8080
 //   - In `npm run dev` with no override, requests use the Vite proxy
 //     (see vite.config.js), so the browser calls /api/... on port 5173
-//     and Vite forwards them to http://localhost:8080. This avoids
-//     CORS problems, because the C++ server does not send CORS headers.
+//     and Vite forwards them to http://localhost:8080.
 //   - In a production build with no override, the default is
-//     http://localhost:8080 (see README.md for the CORS note).
+//     http://localhost:8080. That works from any origin now: the
+//     C++ server sends CORS headers (8 Nov 2026) and answers
+//     preflight OPTIONS requests, so a deployed frontend can call
+//     it directly without a proxy.
 
 // Auth (real login, added 5 Nov 2026): after logging in at
 // POST /api/auth/login the server returns a token, stored in
@@ -38,9 +40,15 @@ export function apiUrl(endpoint) {
 }
 
 export async function api(endpoint, options = {}) {
+  // Give up after 10 seconds instead of hanging forever: without a
+  // timeout a stalled request left the app on "Connecting…" with no
+  // way forward.
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 10000)
   let response
   try {
     response = await fetch(apiUrl(endpoint), {
+      signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
         ...(getAuthToken() ? { Authorization: `Bearer ${getAuthToken()}` } : {}),
@@ -49,8 +57,12 @@ export async function api(endpoint, options = {}) {
       ...options,
     })
   } catch (err) {
+    if (err.name === 'AbortError')
+      throw new Error('The service did not respond within 10 seconds. Check that the backend is running, then try again.')
     // e.g. the C++ server is not running
     throw new Error('Could not reach the API. Is the C++ server running on port 8080?')
+  } finally {
+    clearTimeout(timer)
   }
   let data = null
   try {
@@ -59,6 +71,15 @@ export async function api(endpoint, options = {}) {
     data = null
   }
   if (!response.ok) {
+    if (response.status === 401) {
+      // The login has expired (or was ended elsewhere). Only the
+      // initial load used to handle this, so a token that died
+      // mid-session left the app showing errors on every action
+      // instead of returning to the login page. Clear the dead
+      // token and tell App.jsx to show the login page.
+      clearAuthToken()
+      window.dispatchEvent(new Event('civicfix:unauthorized'))
+    }
     // The C++ API returns {"error": "..."} — show that message, not a generic one.
     const err = new Error((data && data.error) || `API request failed (${response.status})`)
     err.status = response.status

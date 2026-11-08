@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { CATEGORIES, get, post } from '../api.js'
 import { matchesSearch } from '../utils.js'
 import ComplaintDetails from '../components/ComplaintDetails.jsx'
+import EmptyState from '../components/EmptyState.jsx'
+import Feedback from '../components/Feedback.jsx'
 import MapPicker from '../components/MapPicker.jsx'
 
 // Approximate centres, so picking an area drops the pin nearby —
@@ -15,17 +17,13 @@ const AREA_COORDS = {
 }
 
 // Citizen view: submit a complaint, track one by code, and see my complaints.
-// "My complaints" is filtered in the browser from /api/complaints, because
-// the API has no per-citizen endpoint yet.
-//
-// Second wave: my complaints now load automatically when you switch
-// user (no more "press Load" as the only way to see them), with my
-// own open/resolved counts, a search box, and a refresh button —
-// the resident-dashboard basics from the web research.
+// The API returns only this citizen's own complaints (see the security
+// fix, 8 Nov 2026); the browser filter below is only for the search box.
 export default function CitizenPage({ currentUser, areas, users = [] }) {
-  const [form, setForm] = useState({ title: '', description: '', category: 'Garbage Collection', priorityScore: 3, areaId: '' })
+  const [form, setForm] = useState({ title: '', description: '', category: 'Garbage Collection', severity: 'normal', areaId: '' })
   const [submitMsg, setSubmitMsg] = useState('')
   const [submitError, setSubmitError] = useState('')
+  const [submitBusy, setSubmitBusy] = useState(false)
   const [location, setLocation] = useState({ latitude: 0, longitude: 0 })
   const [photo, setPhoto] = useState({ base64: '', ext: '', preview: '' })
 
@@ -51,6 +49,8 @@ export default function CitizenPage({ currentUser, areas, users = [] }) {
   const [tracked, setTracked] = useState(null)
   const [trackError, setTrackError] = useState('')
   const [mine, setMine] = useState([])
+  const [mineLoading, setMineLoading] = useState(true)
+  const [mineSearchInput, setMineSearchInput] = useState('')
   const [mineSearch, setMineSearch] = useState('')
   const [mineError, setMineError] = useState('')
 
@@ -60,15 +60,17 @@ export default function CitizenPage({ currentUser, areas, users = [] }) {
 
   async function submit(event) {
     event.preventDefault()
+    if (submitBusy) return
     setSubmitMsg('')
     setSubmitError('')
+    setSubmitBusy(true)
     try {
       const created = await post('/api/complaints', {
         citizenId: currentUser.id,
         title: form.title,
         description: form.description,
         category: form.category,
-        priorityScore: Number(form.priorityScore),
+        severity: form.severity,
         areaId: Number(form.areaId),
         latitude: location.latitude || undefined,
         longitude: location.longitude || undefined,
@@ -76,15 +78,17 @@ export default function CitizenPage({ currentUser, areas, users = [] }) {
         photoExt: photo.ext || undefined,
       })
       const aiNote = created.aiSuggestedCategory
-        ? ` AI checked it and suggests "${created.aiSuggestedCategory}"${created.aiConfidence ? ` (${Math.round(created.aiConfidence * 100)}% sure)` : ''}${created.aiImageLabel ? `, and your photo looks like: ${created.aiImageLabel}` : ''}.`
-        : ' The AI service was not running, so no AI check was done on this one.'
+        ? ` Suggested category: ${created.aiSuggestedCategory}${created.aiConfidence ? ` (${Math.round(created.aiConfidence * 100)}% sure)` : ''}.`
+        : ' We could not check the category automatically. An admin will review it.'
       setSubmitMsg(`Submitted! Your tracking code is ${created.trackingCode}. Keep it to track your complaint.${aiNote}`)
-      setForm({ title: '', description: '', category: 'Garbage Collection', priorityScore: 3, areaId: '' })
+      setForm({ title: '', description: '', category: 'Garbage Collection', severity: 'normal', areaId: '' })
       setLocation({ latitude: 0, longitude: 0 })
       setPhoto({ base64: '', ext: '', preview: '' })
       loadMine()
     } catch (err) {
       setSubmitError(err.message)
+    } finally {
+      setSubmitBusy(false)
     }
   }
 
@@ -100,33 +104,46 @@ export default function CitizenPage({ currentUser, areas, users = [] }) {
   }
 
   async function loadMine() {
+    setMineLoading(true)
     setMineError('')
     try {
       const all = await get('/api/complaints')
       setMine(all.filter((c) => c.citizenId === currentUser.id))
     } catch (err) {
       setMineError(err.message)
+    } finally {
+      setMineLoading(false)
     }
   }
 
   useEffect(() => { loadMine() }, [currentUser.id])
+  useEffect(() => {
+    const t = setTimeout(() => setMineSearch(mineSearchInput), 250)
+    return () => clearTimeout(t)
+  }, [mineSearchInput])
 
   const filteredMine = mine.filter((c) => matchesSearch(c, mineSearch))
   const myOpen = mine.filter((c) => c.status !== 'Resolved' && c.status !== 'Rejected').length
   const myResolved = mine.filter((c) => c.status === 'Resolved').length
 
+  const skeleton = (
+    <div className="skeleton-list" aria-busy="true" aria-label="Loading">
+      <div className="skeleton-row" /><div className="skeleton-row" /><div className="skeleton-row" />
+    </div>
+  )
+
   return (
     <>
-      <div className="stat-grid" style={{ marginBottom: 16 }}>
-        <div className="stat"><div className="stat-icon green">📋</div><div><strong>{mine.length}</strong><span>My complaints</span></div></div>
-        <div className="stat"><div className="stat-icon amber">⏳</div><div><strong>{myOpen}</strong><span>Still open</span></div></div>
-        <div className="stat"><div className="stat-icon green">✅</div><div><strong>{myResolved}</strong><span>Resolved</span></div></div>
+      <div className="stat-grid mb-16">
+        <div className="stat"><div className="stat-icon green" aria-hidden="true">📋</div><div><strong>{mine.length}</strong><span>My complaints</span></div></div>
+        <div className="stat"><div className="stat-icon amber" aria-hidden="true">⏳</div><div><strong>{myOpen}</strong><span>Still open</span></div></div>
+        <div className="stat"><div className="stat-icon green" aria-hidden="true">✅</div><div><strong>{myResolved}</strong><span>Resolved</span></div></div>
       </div>
 
       <div className="grid-2">
         <div className="card" id="submit-card">
           <h2>Submit a complaint</h2>
-          <p className="small">Submitted as {currentUser.fullName} (user ID {currentUser.id}). The tracking code is generated by the API.</p>
+          <p className="small">You will get a tracking code when you submit.</p>
           <form onSubmit={submit}>
             <label>Title
               <input placeholder="e.g. Broken road in Gulberg" value={form.title} onChange={(e) => update('title', e.target.value)} required />
@@ -139,9 +156,11 @@ export default function CitizenPage({ currentUser, areas, users = [] }) {
                 {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
               </select>
             </label>
-            <label>Priority (1 = lowest, 5 = highest)
-              <select value={form.priorityScore} onChange={(e) => update('priorityScore', e.target.value)}>
-                {[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}
+            <label>How urgent is this?
+              <select value={form.severity} onChange={(e) => update('severity', e.target.value)}>
+                <option value="low">Not urgent — it can wait</option>
+                <option value="normal">Normal</option>
+                <option value="high">Urgent — it is unsafe or blocking people</option>
               </select>
             </label>
             <label>Area
@@ -168,37 +187,43 @@ export default function CitizenPage({ currentUser, areas, users = [] }) {
                 onChange={(lat, lng) => setLocation({ latitude: lat, longitude: lng })}
               />
             </label>
-            <button type="submit">Submit complaint</button>
+            <button type="submit" disabled={submitBusy}>{submitBusy ? 'Submitting…' : 'Submit complaint'}</button>
           </form>
-          {submitMsg && <p className="success" style={{ marginTop: 12 }}>{submitMsg}</p>}
-          {submitError && <p className="error" style={{ marginTop: 12 }}>{submitError}</p>}
+          <Feedback error={submitError} message={submitMsg} onClearMessage={() => setSubmitMsg('')} />
         </div>
 
         <div className="card" id="track-card">
           <h2>Track a complaint</h2>
-          <p className="small">Enter the code you got when you submitted, e.g. CFX-102. The progress stepper below shows exactly where it is.</p>
+          <p className="small">Enter the code you received when you submitted your report.</p>
           <form onSubmit={track}>
             <label>Tracking code
               <input placeholder="e.g. CFX-102" value={code} onChange={(e) => setCode(e.target.value)} required />
             </label>
             <button type="submit">Track</button>
           </form>
-          {trackError && <p className="error" style={{ marginTop: 12 }}>{trackError}</p>}
-          {tracked && <div style={{ marginTop: 12 }}><ComplaintDetails complaint={tracked} areas={areas} users={users} /></div>}
+          <Feedback error={trackError} message="" />
+          {tracked && <div className="mt-12"><ComplaintDetails complaint={tracked} areas={areas} users={users} /></div>}
         </div>
       </div>
 
       <div className="card" id="my-complaints-card">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
-          <h2 style={{ margin: 0 }}>My complaints</h2>
+        <div className="card-head">
+          <h2 className="mt-0">My complaints</h2>
           <div className="refresh-row">
-            <input className="search-input" placeholder="Search my complaints…" value={mineSearch} onChange={(e) => setMineSearch(e.target.value)} />
-            <button className="secondary small" onClick={loadMine}>↻ Refresh</button>
+            <input className="search-input" placeholder="Search my complaints…" value={mineSearchInput} onChange={(e) => setMineSearchInput(e.target.value)} />
+            <button className="secondary small" onClick={loadMine} aria-label="Refresh my complaints"><span aria-hidden="true">↻</span> Refresh</button>
           </div>
         </div>
-        {mineError && <p className="error">{mineError}</p>}
-        {filteredMine.length === 0 && <p className="small">{mine.length === 0 ? `No complaints for ${currentUser.fullName} yet. Submit one above.` : 'No complaints match this search.'}</p>}
-        {filteredMine.map((c) => <ComplaintDetails key={c.id} complaint={c} areas={areas} users={users} />)}
+        <Feedback error={mineError} message="" />
+        {mineLoading ? skeleton : filteredMine.length === 0 ? (
+          <EmptyState
+            icon="📭"
+            title={mine.length === 0 ? `No complaints for ${currentUser.fullName} yet` : 'No complaints match this search'}
+            hint={mine.length === 0 ? 'Submit one above.' : 'Try a different search.'}
+          />
+        ) : (
+          filteredMine.map((c) => <ComplaintDetails key={c.id} complaint={c} areas={areas} users={users} />)
+        )}
       </div>
     </>
   )

@@ -6,6 +6,16 @@
 
 export const STATUS_STEPS = ['Submitted', 'Under Review', 'Assigned', 'In Progress', 'Resolved']
 
+// Does this complaint (or point) have a real location? A coordinate of
+// exactly 0 is valid (the equator / Greenwich), but 0 is falsy in
+// JavaScript, so `latitude && longitude` silently treated it as "no
+// location". Use this everywhere a location is tested. 0,0 together
+// is still "no location picked" — that is the API's sentinel value.
+export function hasCoords(latitude, longitude) {
+  if (latitude == null || longitude == null) return false
+  return !(latitude === 0 && longitude === 0)
+}
+
 export function statusClass(status) {
   return `badge badge-${String(status).toLowerCase().replace(/\s+/g, '-')}`
 }
@@ -25,6 +35,17 @@ export function areaShort(areas, areaId) {
 export function userName(users, userId) {
   const u = (users || []).find((x) => x.id === userId)
   return u ? u.fullName : `User ${userId}`
+}
+
+// Bar colours are fixed per category, not by array position —
+// otherwise a category changes colour whenever the order changes.
+export const CATEGORY_COLORS = {
+  'Garbage Collection': 'green',
+  'Road Damage': 'amber',
+  'Water Supply': 'blue',
+  'Drainage': 'purple',
+  'Streetlight': 'amber',
+  'Other': 'slate',
 }
 
 // Client-side search: the API only filters by status/category, so

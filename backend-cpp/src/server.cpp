@@ -528,15 +528,84 @@ static std::string randomHex(size_t bytes) {
     return out;
 }
 
+// Password hashing: iterated SHA-256 (8 Nov 2026). The old format was a
+// single SHA-256 round — fast enough to brute-force at scale. The new
+// format applies SHA-256 10,000 times, chained: each round hashes the
+// previous hex digest + salt + password. Format: iter10000$<salt>$<hash>.
+// verifyPassword() still accepts the old legacy format
+// <salt>$<sha256(salt+password)> so existing users keep working; a
+// successful legacy login upgrades the stored hash (see the login route).
+static const int kHashIterations = 10000;
+
+static std::string hashPasswordIterated(const std::string& salt, const std::string& password) {
+    std::string digest = sha256Hex(salt + password);
+    for (int i = 1; i < kHashIterations; i++)
+        digest = sha256Hex(digest + salt + password);
+    return digest;
+}
+
 static std::string hashPassword(const std::string& password) {
     std::string salt = randomHex(16);
-    return salt + "$" + sha256Hex(salt + password);
+    return "iter10000$" + salt + "$" + hashPasswordIterated(salt, password);
 }
 
 static bool verifyPassword(const std::string& password, const std::string& stored) {
+    // New format: iter10000$<salt>$<hash>
+    const std::string kPrefix = "iter10000$";
+    if (stored.rfind(kPrefix, 0) == 0) {
+        std::string rest = stored.substr(kPrefix.size());
+        size_t sep = rest.find('$');
+        if (sep == std::string::npos) return false;
+        return hashPasswordIterated(rest.substr(0, sep), password) == rest.substr(sep + 1);
+    }
+    // Legacy format: <salt>$<sha256(salt+password)>
     size_t sep = stored.find('$');
     if (sep == std::string::npos) return false;
     return sha256Hex(stored.substr(0, sep) + password) == stored.substr(sep + 1);
+}
+
+// True when the stored hash is the old single-round format, so the
+// login route can upgrade it after a successful login.
+static bool isLegacyHash(const std::string& stored) {
+    return stored.rfind("iter10000$", 0) != 0;
+}
+
+// Login rate limiting (8 Nov 2026): failed POST /api/auth/login
+// attempts are counted per email in memory. After 5 failures within
+// 15 minutes the email is locked out until the window passes. A
+// successful login clears the counter. Only login is limited.
+struct FailedLogin {
+    int failures = 0;
+    std::time_t firstFailure = 0;
+};
+static std::map<std::string, FailedLogin> g_failedLogins;
+
+static void pruneFailedLogins() {
+    std::time_t now = std::time(nullptr);
+    for (auto it = g_failedLogins.begin(); it != g_failedLogins.end();) {
+        if (now - it->second.firstFailure >= 15 * 60) it = g_failedLogins.erase(it);
+        else ++it;
+    }
+}
+
+static bool loginRateLimited(const std::string& email) {
+    auto it = g_failedLogins.find(email);
+    if (it == g_failedLogins.end()) return false;
+    return it->second.failures >= 5;
+}
+
+static void recordFailedLogin(const std::string& email) {
+    std::time_t now = std::time(nullptr);
+    auto it = g_failedLogins.find(email);
+    if (it == g_failedLogins.end()) {
+        g_failedLogins[email] = FailedLogin{1, now};
+        return;
+    }
+    it->second.failures++;
+}
+
+static void clearFailedLogins(const std::string& email) {
+    g_failedLogins.erase(email);
 }
 
 static std::string expiryIn24h() {
@@ -575,9 +644,15 @@ static void seedDefaultPasswords(Database& db) {
 // Honest limit: tokens are random strings stored in SQLite, not
 // signed JWTs, and passwords are salted SHA-256 (not bcrypt). That
 // is real login for this project, but a production system would use
-// bcrypt/argon2 + signed tokens + HTTPS. Reads of single complaints
-// by tracking code stay public by design (a citizen tracks with
-// just the code); the users list now needs a login.
+// bcrypt/argon2 + signed tokens + HTTPS.
+//
+// Reads are locked down too (fixed 8 Nov 2026 — the old code left
+// most of them open to anyone): the complaints list, a single
+// complaint, its history, the work queue, stats and the audit trail
+// all need a login, and a Citizen only ever sees their own
+// complaints. Only two things stay public by design: tracking a
+// complaint by its code, and the area list. Tracking codes are
+// random now, not sequential, so they cannot be counted through.
 // ------------------------------------------------------------------
 static bool requireRole(Database& db, int actorId, UserRole wanted,
                         const std::string& action, Response& out) {
@@ -595,6 +670,71 @@ static bool requireRole(Database& db, int actorId, UserRole wanted,
         return false;
     }
     return true;
+}
+
+// Loads the logged-in user from the session-derived actorId.
+// Returns false with a 401 in `out` when there is no valid login.
+static bool loadActor(Database& db, int actorId, User& actor, Response& out) {
+    if (actorId <= 0) {
+        out = {401, errorJson("Login required: send Authorization: Bearer <token>")};
+        return false;
+    }
+    if (!userExists(db, actorId, &actor)) {
+        out = {401, errorJson("Invalid or expired login token")};
+        return false;
+    }
+    return true;
+}
+
+// Staff or Admin only (the staff work queue is not for citizens).
+static bool requireStaffOrAdmin(Database& db, int actorId, const std::string& action,
+                                Response& out) {
+    User actor;
+    if (!loadActor(db, actorId, actor, out)) return false;
+    if (actor.role != UserRole::Staff && actor.role != UserRole::Admin) {
+        out = {403, errorJson("Only Staff or Admin users can " + action)};
+        return false;
+    }
+    return true;
+}
+
+// Can this user see this complaint? Admin and Staff see everything;
+// a Citizen sees only their own complaints.
+static bool canSeeComplaint(const User& actor, const Complaint& c) {
+    if (actor.role == UserRole::Admin || actor.role == UserRole::Staff) return true;
+    return c.citizenId == actor.id;
+}
+
+// Public-safe user record: id, name and role only — no email or phone.
+// Citizens and Staff get this from GET /api/users; Admins get the full
+// record. The frontend only needs names to display "Submitted by ...",
+// so nothing on screen changes.
+static std::string userPublicJson(const User& u) {
+    return "{"
+        "\"id\":" + std::to_string(u.id) +
+        ",\"fullName\":" + jsonStr(u.fullName) +
+        ",\"role\":" + jsonStr(toString(u.role)) + "}";
+}
+
+// Random, unguessable tracking code, e.g. CFX-7K3M9P.
+// The old codes were sequential (CFX-101, CFX-102...), so anyone could
+// walk the numbers and read every complaint through the public tracking
+// endpoint. 6 characters from a 32-character alphabet (no 0/O/1/I, so
+// codes stay readable) gives ~1 billion combinations; we still check
+// the database and retry on a collision. Returns "" if no free code
+// could be found (effectively impossible).
+static std::string randomTrackingCode(Database& db) {
+    static const char kAlphabet[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    std::random_device rd;
+    std::mt19937 rng(rd());
+    std::uniform_int_distribution<int> pick(0, 31);
+    for (int attempt = 0; attempt < 10; attempt++) {
+        std::string code = "CFX-";
+        for (int i = 0; i < 6; i++) code += kAlphabet[pick(rng)];
+        Complaint existing;
+        if (!db.getComplaintByTrackingCode(code, existing)) return code;
+    }
+    return "";
 }
 
 static Response handleRequest(Database& db, const std::string& method,
@@ -645,12 +785,29 @@ static Response handleRequest(Database& db, const std::string& method,
         std::string email, password;
         if (!jsonGetString(body, "email", email) || !jsonGetString(body, "password", password))
             return bad("email and password are required");
+        // Rate limiting (8 Nov 2026): 5 failed attempts for one email
+        // within 15 minutes locks that email out until the window
+        // passes. Checked before the password, so a locked-out
+        // attacker cannot keep guessing.
+        pruneFailedLogins();
+        if (loginRateLimited(email))
+            return {429, errorJson("Too many failed login attempts. Try again in a few minutes.")};
         User u;
         // Same message whether the email or the password is wrong,
         // so a login failure does not reveal which accounts exist.
-        if (!db.getUserByEmail(email, u) || u.passwordHash.empty() || !verifyPassword(password, u.passwordHash))
+        if (!db.getUserByEmail(email, u) || u.passwordHash.empty() || !verifyPassword(password, u.passwordHash)) {
+            recordFailedLogin(email);
             return {401, errorJson("Invalid email or password")};
-        if (!u.isActive) return {401, errorJson("This account is disabled")};
+        }
+        if (!u.isActive) {
+            recordFailedLogin(email);
+            return {401, errorJson("This account is disabled")};
+        }
+        // Successful login: clear the failure counter, and upgrade a
+        // legacy single-round hash to the iterated format.
+        clearFailedLogins(email);
+        if (isLegacyHash(u.passwordHash))
+            db.setUserPasswordHash(u.id, hashPassword(password));
         std::string token = randomHex(32);
         if (!db.createSession(u.id, token, expiryIn24h())) return {500, errorJson("Could not start session")};
         return {200, "{\"user\":" + userJson(u) + ",\"token\":" + jsonStr(token) + "}"};
@@ -672,8 +829,15 @@ static Response handleRequest(Database& db, const std::string& method,
     // GET /api/users, POST /api/users
     if (p.size() == 2 && p[0] == "api" && p[1] == "users") {
         if (method == "GET") {
-            if (actorId <= 0) return {401, errorJson("Login required: send Authorization: Bearer <token>")};
-            return {200, listJson<User>(db.getAllUsers(), userJson)};
+            User actor;
+            Response denied;
+            if (!loadActor(db, actorId, actor, denied)) return denied;
+            // Admins see the full record (the Team card needs it).
+            // Everyone else gets names + roles only, so a logged-in
+            // citizen cannot harvest other citizens' emails and phones.
+            if (actor.role == UserRole::Admin)
+                return {200, listJson<User>(db.getAllUsers(), userJson)};
+            return {200, listJson<User>(db.getAllUsers(), userPublicJson)};
         }
         if (method == "POST") {
             Response denied;
@@ -710,7 +874,18 @@ static Response handleRequest(Database& db, const std::string& method,
     // POST /api/complaints, GET /api/complaints
     if (p.size() == 2 && p[0] == "api" && p[1] == "complaints") {
         if (method == "GET") {
+            User actor;
+            Response denied;
+            if (!loadActor(db, actorId, actor, denied)) return denied;
             std::vector<Complaint> all = db.getAllComplaints();
+            // Citizens see only their own complaints; Staff and Admin
+            // see the whole table. The citizen page's browser-side
+            // filter still works — it just filters an already-scoped list.
+            if (actor.role == UserRole::Citizen) {
+                std::vector<Complaint> mine;
+                for (const Complaint& c : all) if (c.citizenId == actorId) mine.push_back(c);
+                all = mine;
+            }
             auto statusIt = query.find("status");
             if (statusIt != query.end()) {
                 ComplaintStatus wanted;
@@ -747,8 +922,19 @@ static Response handleRequest(Database& db, const std::string& method,
             std::string catStr;
             if (!jsonGetString(body, "category", catStr) || !parseCategory(catStr, c.category))
                 return bad("category must be e.g. Garbage Collection, Road Damage, Water Supply, Drainage, Streetlight or Other");
-            if (!jsonGetInt(body, "priorityScore", c.priorityScore)) c.priorityScore = 3;
-            if (c.priorityScore < 1 || c.priorityScore > 5) return bad("priorityScore must be 1-5");
+            std::string severity;
+            if (jsonGetString(body, "severity", severity)) {
+                // Citizen-facing wording wins over the numeric score:
+                // "low"/"normal"/"high" instead of a 1-5 number the
+                // citizen had to guess at.
+                if (severity == "low") c.priorityScore = 2;
+                else if (severity == "normal") c.priorityScore = 3;
+                else if (severity == "high") c.priorityScore = 5;
+                else return bad("severity must be low, normal or high");
+            } else {
+                if (!jsonGetInt(body, "priorityScore", c.priorityScore)) c.priorityScore = 3;
+                if (c.priorityScore < 1 || c.priorityScore > 5) return bad("priorityScore must be 1-5");
+            }
             if (!jsonGetInt(body, "areaId", c.areaId)) return bad("areaId is required");
             if (!userExists(db, c.citizenId)) return bad("citizenId does not exist");
             // Optional map location + photo, added 5 Nov 2026.
@@ -760,16 +946,11 @@ static Response handleRequest(Database& db, const std::string& method,
             std::string photoB64, photoExt;
             bool hasPhoto = jsonGetString(body, "photoBase64", photoB64) && !photoB64.empty();
             if (hasPhoto) jsonGetString(body, "photoExt", photoExt);
-            int maxSuffix = 100;
-            for (const Complaint& existing : db.getAllComplaints()) {
-                if (existing.trackingCode.rfind("CFX-", 0) == 0) {
-                    try {
-                        int n = std::stoi(existing.trackingCode.substr(4));
-                        if (n > maxSuffix) maxSuffix = n;
-                    } catch (...) {}
-                }
-            }
-            c.trackingCode = "CFX-" + std::to_string(maxSuffix + 1);
+            // Random, unguessable tracking code (see randomTrackingCode).
+            // The old codes were sequential, so anyone could count
+            // through them on the public tracking endpoint.
+            c.trackingCode = randomTrackingCode(db);
+            if (c.trackingCode.empty()) return {500, errorJson("Could not generate a tracking code")};
             c.photoPath = "";
             if (hasPhoto) {
                 std::string saved;
@@ -835,8 +1016,13 @@ static Response handleRequest(Database& db, const std::string& method,
     if (p.size() >= 3 && p[0] == "api" && p[1] == "complaints" && isNumber(p[2])) {
         int id = std::stoi(p[2]);
         if (method == "GET" && p.size() == 3) {
+            User actor;
+            Response denied;
+            if (!loadActor(db, actorId, actor, denied)) return denied;
             Complaint c;
             if (!db.getComplaintById(id, c)) return {404, errorJson("Complaint not found")};
+            if (!canSeeComplaint(actor, c))
+                return {403, errorJson("A citizen can only view their own complaints")};
             return {200, complaintJson(c)};
         }
         if (method == "POST" && p.size() == 4 && p[3] == "photo") {
@@ -867,8 +1053,13 @@ static Response handleRequest(Database& db, const std::string& method,
             return {200, complaintJson(updated)};
         }
         if (method == "GET" && p.size() == 4 && p[3] == "history") {
+            User actor;
+            Response denied;
+            if (!loadActor(db, actorId, actor, denied)) return denied;
             Complaint c;
             if (!db.getComplaintById(id, c)) return {404, errorJson("Complaint not found")};
+            if (!canSeeComplaint(actor, c))
+                return {403, errorJson("A citizen can only view the history of their own complaints")};
             return {200, listJson<StatusUpdate>(db.getComplaintHistory(id), historyJson)};
         }
         if ((method == "PATCH" || method == "PUT") && p.size() == 4 && p[3] == "status") {
@@ -925,9 +1116,16 @@ static Response handleRequest(Database& db, const std::string& method,
 
     // GET /api/admin/actions, GET /api/admin/actions/latest, POST /api/admin/undo
     if (p.size() >= 3 && p[0] == "api" && p[1] == "admin" && p[2] == "actions") {
-        if (method == "GET" && p.size() == 3)
+        if (method == "GET" && p.size() == 3) {
+            Response denied;
+            if (!requireRole(db, actorId, UserRole::Admin, "view the audit trail", denied))
+                return denied;
             return {200, listJson<AdminAction>(db.getAllAdminActions(), actionJson)};
+        }
         if (method == "GET" && p.size() == 4 && p[3] == "latest") {
+            Response denied;
+            if (!requireRole(db, actorId, UserRole::Admin, "view the audit trail", denied))
+                return denied;
             AdminAction a;
             if (!db.getLatestAdminAction(a)) return {404, errorJson("No pending admin action")};
             return {200, actionJson(a)};
@@ -955,6 +1153,9 @@ static Response handleRequest(Database& db, const std::string& method,
 
     // GET /api/stats
     if (method == "GET" && p.size() == 2 && p[0] == "api" && p[1] == "stats") {
+        Response denied;
+        if (!requireRole(db, actorId, UserRole::Admin, "view statistics", denied))
+            return denied;
         std::vector<Complaint> all = db.getAllComplaints();
         std::map<std::string, int> byStatus, byCategory;
         int resolved = 0;
@@ -983,8 +1184,20 @@ static Response handleRequest(Database& db, const std::string& method,
                       ",\"byCategory\":" + mapJson(byCategory) + "}"};
     }
 
+    // GET /api/me/assignments — the logged-in staff member's own work:
+    // complaints currently assigned to them, in assignment order.
+    // Staff only: a Citizen or Admin asking for "my assignments" gets 403.
+    if (method == "GET" && p.size() == 3 && p[0] == "api" && p[1] == "me" && p[2] == "assignments") {
+        Response denied;
+        if (!requireRole(db, actorId, UserRole::Staff, "view their own assignments", denied))
+            return denied;
+        return {200, listJson<Complaint>(db.getComplaintsAssignedTo(actorId), complaintJson)};
+    }
+
     // GET /api/queue — active complaints in FIFO order, via the custom queue.
     if (method == "GET" && p.size() == 2 && p[0] == "api" && p[1] == "queue") {
+        Response denied;
+        if (!requireStaffOrAdmin(db, actorId, "view the work queue", denied)) return denied;
         ComplaintQueue queue;
         for (const Complaint& c : db.getAllComplaints()) {
             if (c.status != ComplaintStatus::Resolved && c.status != ComplaintStatus::Rejected)
@@ -1007,19 +1220,33 @@ static std::string statusText(int code) {
     switch (code) {
         case 200: return "OK";
         case 201: return "Created";
+        case 204: return "No Content";
         case 400: return "Bad Request";
         case 401: return "Unauthorized";
         case 403: return "Forbidden";
         case 404: return "Not Found";
         case 409: return "Conflict";
+        case 429: return "Too Many Requests";
         case 500: return "Internal Server Error";
         default: return "OK";
     }
 }
 
+// CORS (8 Nov 2026): the Vite dev proxy used to hide the fact that
+// this server sends no cross-origin headers at all, so a frontend
+// served from any other origin could not call it directly. Every
+// response now carries the CORS headers, and preflight OPTIONS
+// requests are answered in the main loop below. This is demo-grade
+// CORS — any origin may call the API — because the frontend uses
+// Bearer tokens, not cookies, so a wildcard origin is safe for
+// this setup. A production deployment should restrict the origin
+// list to the domains it actually serves.
 static void sendResponse(socket_t client, const Response& res) {
     std::string header = "HTTP/1.1 " + std::to_string(res.code) + " " + statusText(res.code) +
         "\r\nContent-Type: " + res.contentType + "\r\nContent-Length: " + std::to_string(res.body.size()) +
+        "\r\nAccess-Control-Allow-Origin: *" +
+        "\r\nAccess-Control-Allow-Headers: Content-Type, Authorization" +
+        "\r\nAccess-Control-Allow-Methods: GET, POST, PATCH, PUT, DELETE, OPTIONS" +
         "\r\nConnection: close\r\n\r\n";
     std::string all = header + res.body;
     size_t sent = 0;
@@ -1201,7 +1428,12 @@ int main(int argc, char* argv[]) {
             }
         }
         Response res = {400, errorJson("Bad request")};
-        if (!method.empty() && !path.empty())
+        if (method == "OPTIONS") {
+            // CORS preflight: browsers send this before a real
+            // cross-origin request. No body, no auth — just the
+            // CORS headers that sendResponse() adds to every reply.
+            res = {204, ""};
+        } else if (!method.empty() && !path.empty())
             res = handleRequest(db, method, path, query, body, actorId, authToken);
         std::cout << method << " " << target << " -> " << res.code << "\n";
         sendResponse(client, res);

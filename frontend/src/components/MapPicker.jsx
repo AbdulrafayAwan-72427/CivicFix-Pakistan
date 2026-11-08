@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
+import { hasCoords } from '../utils.js'
 
 // Map, using Leaflet + OpenStreetMap tiles (no API key needed).
 // Two modes:
@@ -28,7 +29,7 @@ export default function MapPicker({ latitude, longitude, onChange, readOnly = fa
   useEffect(() => {
     if (!divRef.current || mapRef.current) return
     const map = L.map(divRef.current, { scrollWheelZoom: !readOnly }).setView(
-      latitude && longitude ? [latitude, longitude] : LAHORE, latitude && longitude ? 15 : 12,
+      hasCoords(latitude, longitude) ? [latitude, longitude] : LAHORE, hasCoords(latitude, longitude) ? 15 : 12,
     )
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
@@ -46,7 +47,7 @@ export default function MapPicker({ latitude, longitude, onChange, readOnly = fa
   useEffect(() => {
     const map = mapRef.current
     if (!map || markers) return
-    if (latitude && longitude) {
+    if (hasCoords(latitude, longitude)) {
       if (!markerRef.current) {
         markerRef.current = L.marker([latitude, longitude], { icon: pinIcon() }).addTo(map)
       } else {
@@ -67,7 +68,7 @@ export default function MapPicker({ latitude, longitude, onChange, readOnly = fa
     const group = L.layerGroup()
     const points = []
     markers.forEach((m) => {
-      if (!m.latitude || !m.longitude) return
+      if (!hasCoords(m.latitude, m.longitude)) return
       points.push([m.latitude, m.longitude])
       const marker = L.marker([m.latitude, m.longitude], { icon: pinIcon() })
       marker.bindPopup(`<strong>${m.trackingCode || ''}</strong><br>${m.title || ''}`)
@@ -90,12 +91,12 @@ export default function MapPicker({ latitude, longitude, onChange, readOnly = fa
 
   return (
     <div>
-      <div ref={divRef} style={{ height, width: '100%', borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)' }} />
+      <div ref={divRef} style={{ height: `clamp(200px, 40vh, ${height}px)`, width: '100%', borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)' }} />
       {!readOnly && (
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
-          <button type="button" className="secondary small" onClick={useMyLocation}>📍 Use my location</button>
+          <button type="button" className="secondary small" onClick={useMyLocation}><span aria-hidden="true">📍</span> Use my location</button>
           <span className="small">
-            {latitude && longitude
+            {hasCoords(latitude, longitude)
               ? `Picked: ${Number(latitude).toFixed(5)}, ${Number(longitude).toFixed(5)} — click the map to move the pin.`
               : 'Click the map to drop a pin where the problem is.'}
           </span>

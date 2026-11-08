@@ -76,6 +76,10 @@ public:
     std::vector<Area> getAllAreas();
     std::vector<User> getAllUsers();
     bool assignComplaint(int complaintId, int staffId, int assignedByAdminId);
+    // Complaints currently assigned to one staff member, in assignment
+    // order (assignments.id). A complaint assigned twice counts once,
+    // at its latest assignment.
+    std::vector<Complaint> getComplaintsAssignedTo(int staffId);
     std::vector<AdminAction> getAllAdminActions();
 
     // Persistent Admin Action Stack
