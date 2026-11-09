@@ -71,7 +71,18 @@ export default function MapPicker({ latitude, longitude, onChange, readOnly = fa
       if (!hasCoords(m.latitude, m.longitude)) return
       points.push([m.latitude, m.longitude])
       const marker = L.marker([m.latitude, m.longitude], { icon: pinIcon() })
-      marker.bindPopup(`<strong>${m.trackingCode || ''}</strong><br>${m.title || ''}`)
+      // Build the popup from DOM nodes, never from an HTML string:
+      // the title is typed by a citizen, so it must be shown as plain
+      // text. Putting it in a template string would let a crafted
+      // title (e.g. "<img src=x onerror=...>") run as markup in the
+      // admin's browser (stored XSS). textContent is always literal.
+      const popup = document.createElement('div')
+      const code = document.createElement('strong')
+      code.textContent = m.trackingCode || ''
+      popup.appendChild(code)
+      popup.appendChild(document.createElement('br'))
+      popup.appendChild(document.createTextNode(m.title || ''))
+      marker.bindPopup(popup)
       if (m.onSelect) marker.on('click', () => m.onSelect(m))
       marker.addTo(group)
     })

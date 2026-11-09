@@ -17,9 +17,9 @@ From the project root:
 git init
 git add .
 git status          # check: no .exe, no node_modules, no test DBs
-git commit -m "CivicFix Pakistan: C++ API, DSA viva package, frontend, ML service"
+git commit -m "CivicFix Pakistan: C++ API, React frontend, ML service"
 git branch -M main
-git remote add origin https://github.com/<your-username>/CivicFix-Pakistan.git
+git remote add origin https://github.com/AbdulrafayAwan-72427/CivicFix-Pakistan.git
 git push -u origin main
 ```
 
@@ -54,18 +54,22 @@ cd frontend
 npm run build        # output: frontend/dist/
 ```
 
-Host `dist/` on Vercel, Netlify, or GitHub Pages. **But:** a static
-build does not have the Vite dev proxy, so it will call the API
-directly from the browser. That only works if one of these is true:
+Host `dist/` on Vercel, Netlify, or GitHub Pages. A static build
+does not have the Vite dev proxy, so it will call the API directly
+from the browser. That works because the API sends CORS headers
+(see `documentation/API.md`). By default it allows any origin,
+which is fine for local development; for a public deployment, set
+the `CIVICFIX_ALLOWED_ORIGINS` environment variable on the machine
+running the API to a comma-separated list of the real frontend
+origin(s), for example:
 
-- The API sends CORS headers (it does not yet — this is a small
-  change to `backend-cpp/src/server.cpp`: add
-  `Access-Control-Allow-Origin` to responses, and handle OPTIONS),
-  or
-- The frontend is served behind the same proxy / domain as the API.
+```
+CIVICFIX_ALLOWED_ORIGINS=https://civicfix.example.com
+```
 
-Until CORS is added, treat a static-only deployment as "frontend
-demo, API still local" — not a fully live system.
+A browser from any other origin then gets no CORS header and its
+requests are refused. The API prints the allowed origins when it
+starts, so you can check the setting took effect.
 
 ### C++ API + SQLite (needs a real server)
 
@@ -102,14 +106,32 @@ limiting — the service currently has none, and is bound to
 
 ## 4. Before any public launch — checklist
 
-- [ ] Password hashing + a `password_hash` column + real login
-- [ ] Role checks on API admin endpoints (do not trust
-      `changedByUserId` from the client alone)
-- [ ] CORS on the C++ API, or a same-origin proxy
-- [ ] C++ API → ML service call wired in (React still must not call
+Done already (verified on 8 Nov 2026):
+
+- [x] Password hashing (salted SHA-256, 10,000 rounds) + a
+      `password_hash` column + real login with session tokens
+- [x] Role checks on API endpoints, including read endpoints —
+      citizens only ever see their own complaints
+- [x] CORS on the C++ API, with an origin allowlist via
+      `CIVICFIX_ALLOWED_ORIGINS` (see section 3 above)
+- [x] C++ API → ML service call wired in (React still must not call
       ML directly)
+
+Still to do:
+
+- [ ] Rebuild the API from the current source and restart it — do
+      not keep running an older `civicfix_api.exe` from before the
+      security fixes (check every protected endpoint returns 401
+      without a token after each rebuild, not just `/api/health`)
+- [ ] Change or disable the seeded demo passwords
+      (`admin@civicfix.pk` / `admin123`, `ali@example.com` /
+      `ali123`); never deploy with public default passwords, and
+      do not publish real user data in a seed database
+- [ ] Set `CIVICFIX_ALLOWED_ORIGINS` to the real frontend origin(s)
 - [ ] Persistent storage for the database (volume or PostgreSQL)
 - [ ] HTTPS on every public URL
+- [ ] Dockerfile / build script for the API and ML service (needed
+      for Render / Railway / Fly.io)
 - [ ] ML model re-evaluated on real, unseen complaints (the current
       0.972 test score is on template-generated demo data)
 - [ ] Secrets (if any are added later) in environment variables,

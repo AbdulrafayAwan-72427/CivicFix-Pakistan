@@ -67,15 +67,22 @@ Trade-offs to know for the viva:
   `GET /api/me/assignments` (8 Nov 2026) is Staff only and returns
   the complaints currently assigned to the logged-in staff member,
   in assignment order — the Staff page's "My assignments" view.
-  **CORS (8 Nov 2026):** every response carries
-  `Access-Control-Allow-Origin: *` plus `Allow-Headers:
-  Content-Type, Authorization` and `Allow-Methods: GET, POST,
-  PATCH, PUT, DELETE, OPTIONS`, and preflight `OPTIONS` requests
-  are answered with 204 — so a frontend served from any origin can
-  call the API directly without a proxy. Demo-grade: any origin
-  may call it. The frontend uses Bearer tokens, not cookies, so a
-  wildcard origin is safe for this setup; a production deployment
-  should restrict the origin list to the domains it serves.
+  **CORS (8 Nov 2026, allowlist added Nov 2026):** every response
+  carries CORS headers and preflight `OPTIONS` requests are
+  answered with 204 — so a frontend served from any origin can
+  call the API directly without a proxy. Which origins are allowed
+  comes from the `CIVICFIX_ALLOWED_ORIGINS` environment variable
+  (comma-separated, e.g.
+  `CIVICFIX_ALLOWED_ORIGINS=https://civicfix.example.com,https://app.example.com`).
+  Unset or empty means `*` (any origin) — the local-development
+  default. The frontend uses Bearer tokens, not cookies, so a
+  wildcard origin is safe for this setup, but a public deployment
+  should set the variable to the real frontend origin(s) only: a
+  browser from any other origin then gets no
+  `Access-Control-Allow-Origin` header and its requests are
+  refused. Allowed origins are echoed back exactly (with
+  `Vary: Origin`); disallowed origins get no CORS headers at all.
+  The API prints the allowed origins when it starts.
   **Urgency instead of self-chosen priority (8 Nov 2026):**
   `POST /api/complaints` accepts `severity` — "low" → priority 2,
   "normal" → 3, "high" → 5. A valid severity wins over any

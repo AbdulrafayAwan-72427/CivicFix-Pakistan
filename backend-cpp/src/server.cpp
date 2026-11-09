@@ -30,6 +30,7 @@
 #include <filesystem>
 #include <fstream>
 #include <ctime>
+#include <cstdlib>
 #include <iostream>
 #include <map>
 #include <string>
@@ -1232,21 +1233,55 @@ static std::string statusText(int code) {
     }
 }
 
-// CORS (8 Nov 2026): the Vite dev proxy used to hide the fact that
-// this server sends no cross-origin headers at all, so a frontend
-// served from any other origin could not call it directly. Every
-// response now carries the CORS headers, and preflight OPTIONS
-// requests are answered in the main loop below. This is demo-grade
-// CORS — any origin may call the API — because the frontend uses
-// Bearer tokens, not cookies, so a wildcard origin is safe for
-// this setup. A production deployment should restrict the origin
-// list to the domains it actually serves.
-static void sendResponse(socket_t client, const Response& res) {
+// CORS (8 Nov 2026, allowlist added Nov 2026): the Vite dev proxy used
+// to hide the fact that this server sent no cross-origin headers at
+// all, so a frontend served from any other origin could not call it
+// directly. Every response now carries CORS headers, and preflight
+// OPTIONS requests are answered in the main loop below.
+//
+// Which origins are allowed comes from the CIVICFIX_ALLOWED_ORIGINS
+// environment variable — a comma-separated list, e.g.
+//   CIVICFIX_ALLOWED_ORIGINS=https://civicfix.example.com,https://app.example.com
+// Unset or empty means "*" (any origin), the local-development
+// default. That is safe here because the frontend uses Bearer
+// tokens, not cookies. Before a public deployment, set it to the
+// real frontend origin(s) only: a browser from any other origin
+// then gets no Access-Control-Allow-Origin header and its
+// cross-origin requests are refused by the browser. Non-browser
+// clients (curl, the Vite proxy) are unaffected — CORS is a browser
+// rule, not a server firewall.
+static std::string corsAllowedOrigin(const std::string& requestOrigin) {
+    const char* env = std::getenv("CIVICFIX_ALLOWED_ORIGINS");
+    if (env == nullptr || std::string(env).empty()) return "*";
+    std::string list = env;
+    size_t start = 0;
+    while (start <= list.size()) {
+        size_t comma = list.find(',', start);
+        std::string entry = list.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+        size_t first = entry.find_first_not_of(" \t");
+        size_t last = entry.find_last_not_of(" \t");
+        if (first != std::string::npos) entry = entry.substr(first, last - first + 1);
+        else entry.clear();
+        if (entry == "*") return "*";
+        if (!requestOrigin.empty() && entry == requestOrigin) return requestOrigin;
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+    return "";  // origin not on the allowlist: send no CORS headers
+}
+
+static void sendResponse(socket_t client, const Response& res, const std::string& requestOrigin) {
+    std::string cors;
+    std::string allowed = corsAllowedOrigin(requestOrigin);
+    if (!allowed.empty()) {
+        cors = "\r\nAccess-Control-Allow-Origin: " + allowed +
+            "\r\nAccess-Control-Allow-Headers: Content-Type, Authorization" +
+            "\r\nAccess-Control-Allow-Methods: GET, POST, PATCH, PUT, DELETE, OPTIONS";
+        if (allowed != "*") cors += "\r\nVary: Origin";
+    }
     std::string header = "HTTP/1.1 " + std::to_string(res.code) + " " + statusText(res.code) +
         "\r\nContent-Type: " + res.contentType + "\r\nContent-Length: " + std::to_string(res.body.size()) +
-        "\r\nAccess-Control-Allow-Origin: *" +
-        "\r\nAccess-Control-Allow-Headers: Content-Type, Authorization" +
-        "\r\nAccess-Control-Allow-Methods: GET, POST, PATCH, PUT, DELETE, OPTIONS" +
+        cors +
         "\r\nConnection: close\r\n\r\n";
     std::string all = header + res.body;
     size_t sent = 0;
@@ -1366,6 +1401,11 @@ int main(int argc, char* argv[]) {
 
     std::cout << "CivicFix API listening on http://localhost:" << port << "\n";
     std::cout << "Database: " << dbPath << "\n";
+    {
+        const char* origins = std::getenv("CIVICFIX_ALLOWED_ORIGINS");
+        std::cout << "CORS allowed origins: "
+                  << (origins == nullptr || std::string(origins).empty() ? "*" : origins) << "\n";
+    }
     std::cout << "Press Ctrl+C to stop.\n";
 
     while (true) {
@@ -1427,6 +1467,23 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
+        // The Origin header decides which CORS header the reply gets:
+        // see corsAllowedOrigin() above. Browsers send it on
+        // cross-origin requests; curl and the Vite proxy do not.
+        std::string requestOrigin;
+        {
+            size_t headerEnd2 = raw.find("\r\n\r\n");
+            std::string headersPart = headerEnd2 == std::string::npos ? raw : raw.substr(0, headerEnd2);
+            std::string lowerHeaders = headersPart;
+            for (char& c : lowerHeaders) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            size_t pos = lowerHeaders.find("origin:");
+            if (pos != std::string::npos) {
+                size_t start = pos + 7;
+                while (start < headersPart.size() && headersPart[start] == ' ') start++;
+                size_t lineEnd = headersPart.find("\r\n", start);
+                requestOrigin = headersPart.substr(start, lineEnd == std::string::npos ? std::string::npos : lineEnd - start);
+            }
+        }
         Response res = {400, errorJson("Bad request")};
         if (method == "OPTIONS") {
             // CORS preflight: browsers send this before a real
@@ -1436,7 +1493,7 @@ int main(int argc, char* argv[]) {
         } else if (!method.empty() && !path.empty())
             res = handleRequest(db, method, path, query, body, actorId, authToken);
         std::cout << method << " " << target << " -> " << res.code << "\n";
-        sendResponse(client, res);
+        sendResponse(client, res, requestOrigin);
         CLOSE_SOCKET(client);
     }
     // Unreachable in normal use (Ctrl+C stops the process).

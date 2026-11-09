@@ -147,7 +147,6 @@ tracking, staff queue, admin dashboard and map, assignments, status
 changes with undo, audit trail, and category suggestions from text
 and photos.
 
-<<<<<<< HEAD
 **Security (8 Nov 2026):** every read endpoint now needs a login,
 and a citizen only ever sees their own complaints — staff and admin
 see the full picture, citizens and staff see names without emails or
@@ -184,11 +183,23 @@ build. The backend also builds with CMake now
 mid-session returns to the login page instead of erroring on
 every action.
 
+**Review fixes (8 Nov 2026):** a second outside review found a
+stored-XSS hole in the admin map — complaint titles were dropped
+into popup HTML as a string. Map popups are now built from DOM
+nodes with `textContent`, so a title is always shown as plain
+text. The same review found the frontend README and deployment
+guide still describing the app as if it had no login; both now
+match the current code. The API also takes a CORS origin
+allowlist now: set `CIVICFIX_ALLOWED_ORIGINS` to a
+comma-separated list of your frontend origins before a public
+deployment (unset means any origin, which is the local
+development default). The review also flagged that an old API
+executable can keep running on port 8080 after a rebuild — always
+stop the old one and rebuild from the current source before
+demoing, and check protected endpoints return 401 without a
+token, not just that `/api/health` answers.
+
 Still to do before public use: change the demo passwords, and
-=======
-Still to do before public use: change the demo passwords, add
-CORS headers (or keep the Vite proxy) for a deployed frontend, and
->>>>>>> 1f711aa1698667f18555ce5c2a74bd03c4f55755
 a hosted deployment — see `documentation/DEPLOYMENT.md`. The photo
 categorisation is a general-purpose image classifier used as a
 routing hint, not a model trained on civic photos, so low-confidence

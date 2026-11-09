@@ -44,40 +44,58 @@ VITE_API_URL=http://localhost:8080 npm run dev
 If you do not set it:
 - `npm run dev` calls `/api/...` on the same origin (port 5173),
   and Vite proxies those requests to `http://localhost:8080`
-  (see `vite.config.js`). This is deliberate: the C++ server does
-  not send CORS headers, so a browser page on port 5173 calling
-  `http://localhost:8080` directly would be blocked by the browser.
+  (see `vite.config.js`).
 - A production build defaults to `http://localhost:8080` directly.
-  For a real deployment, either serve the frontend behind the same
-  proxy, or add CORS headers (`Access-Control-Allow-Origin`) to the
-  C++ server — that backend change is intentionally not in this
-  frontend-only task.
+  That works because the C++ API now sends CORS headers (see
+  `../documentation/API.md`): a deployed frontend can call it
+  without a proxy. For a public deployment, restrict the API's
+  allowed origins with the `CIVICFIX_ALLOWED_ORIGINS` environment
+  variable instead of leaving it open to any origin.
 
-## No login yet — please read this
+## Login and roles
 
-The C++ API has no authentication (the `users` table has no password
-column), so this app does **not** fake a login. The header has a demo
-user selector: pick an existing user (seeded defaults are citizen
-ID 1, Ali Khan, and admin ID 2, CivicFix Admin). That user's ID is
-sent as `citizenId` / `changedByUserId` / `assignedByAdminId`.
-Anyone could pick any user, so do not treat this as security. Real
-login needs password hashing and tokens on the backend first.
+The app has real login. The API stores salted, iterated password
+hashes and issues a session token (24h expiry); the token is kept
+in `localStorage` and sent as a Bearer header on every request.
+If a login expires mid-session, the app returns to the login page.
+
+Roles decide what you see — a Citizen sees Submit / Track /
+My complaints, Staff sees the work queue, and an Admin sees the
+Operations Center, Team and Admin actions. Other roles' pages are
+not rendered, and the API enforces the same rules server-side.
+
+Demo accounts (seeded in `database/civicfix.db` — change these
+passwords before any real use):
+
+- Admin: `admin@civicfix.pk` / `admin123`
+- Citizen: `ali@example.com` / `ali123`
+- Staff: `staff123` (password for staff accounts created in the app)
+
+The login page shows the demo accounts only in development builds.
+You can also create a new Citizen account from the login page.
 
 ## What is in the app
 
-- **Citizen tab** — submit a complaint (title, description, category,
-  priority 1–5, area from `/api/areas`), track by tracking code
-  (try `CFX-102`), view details + status history, and list "my"
-  complaints (filtered in the browser, because the API has no
-  per-citizen endpoint yet).
-- **Admin tab** — dashboard from `/api/stats`, complaints list with
-  status/category filters and `?sort=priority`, status changes
-  (only the transitions the API allows are offered; a bad transition
-  shows the API's own 400 error message), staff assignment,
-  admin actions, and undo of the latest action.
-- **Staff tab** — the FIFO work queue from `/api/queue` plus all
-  active complaints. There is no per-staff assignment endpoint in
-  the API yet, so this page cannot show "only my assignments".
+- **Citizen** — submit a complaint (title, description, category,
+  area from `/api/areas`, how urgent it is in plain words, an
+  optional photo and a map pin), track by tracking code, view
+  details + status history, and list "my" complaints (the API
+  filters these server-side to the logged-in citizen).
+- **Admin** — Operations Center with stats, complaints list with
+  search / area filter / sort / pagination, CSV export, charts,
+  audit feed, and a detail drawer; staff assignment, admin
+  actions, and undo of the latest action; a Team page to add
+  staff members.
+- **Staff** — the FIFO work queue from `/api/queue`, a "My
+  assignments" view (`/api/me/assignments`), and active complaints.
+- **Map** — Leaflet + OpenStreetMap, no API key. Citizens drop a
+  pin when reporting; the admin map shows complaint pins. Map
+  popups are built from DOM nodes with `textContent`, so a
+  complaint title is always shown as plain text, never as HTML.
+- **Photos and AI** — a photo (JPG/PNG, under 5 MB) can be attached
+  to a complaint; the backend asks the ML service for a category
+  suggestion and an image label, shown as a routing hint with its
+  confidence. If the ML service is down, the complaint still saves.
 
 ## Status transitions (enforced by the API)
 
@@ -92,6 +110,10 @@ Resolved / Rejected -> terminal
 ## Files
 
 - `src/api.js` — fetch wrapper, API base URL, categories, statuses, transitions
-- `src/App.jsx` — header, demo user selector, tab navigation
-- `src/pages/CitizenPage.jsx`, `src/pages/AdminPage.jsx`, `src/pages/StaffPage.jsx`
+- `src/App.jsx` — header, role-based navigation, login gating
+- `src/pages/LoginPage.jsx`, `src/pages/CitizenPage.jsx`, `src/pages/AdminPage.jsx`, `src/pages/StaffPage.jsx`
 - `src/components/ComplaintDetails.jsx` — complaint details + history
+- `src/components/MapPicker.jsx` — Leaflet map picker and admin map pins
+- `src/components/Feedback.jsx` — success/error messages
+- `src/components/EmptyState.jsx` — empty-list states
+- `src/utils.js` — shared helpers (including `hasCoords`)
