@@ -200,6 +200,21 @@ static std::string complaintJson(const Complaint& c) {
         ",\"updatedAt\":" + jsonStr(c.updatedAt) + "}";
 }
 
+// Public tracking response (9 Nov 2026, handoff-2 phase 1): the
+// anonymous track-by-code endpoint used to return the full complaint
+// serializer — citizen id, description, coordinates and photo path
+// included. A tracking code is only meant to answer "where is my
+// report?": code, status and last update. Logged-in views keep the
+// full complaintJson above; photo delivery (/uploads/...) is unchanged
+// for now, because <img> tags cannot send a Bearer token — locking
+// it down needs a signed-URL or cookie change, not a one-line fix.
+static std::string publicTrackingJson(const Complaint& c) {
+    return "{"
+        "\"trackingCode\":" + jsonStr(c.trackingCode) +
+        ",\"status\":" + jsonStr(toString(c.status)) +
+        ",\"updatedAt\":" + jsonStr(c.updatedAt) + "}";
+}
+
 static std::string userJson(const User& u) {
     return "{"
         "\"id\":" + std::to_string(u.id) +
@@ -299,7 +314,16 @@ static bool isValidTransition(ComplaintStatus oldStatus, ComplaintStatus newStat
         return newStatus == ComplaintStatus::InProgress || newStatus == ComplaintStatus::Rejected;
     if (oldStatus == ComplaintStatus::InProgress)
         return newStatus == ComplaintStatus::Resolved || newStatus == ComplaintStatus::Rejected;
-    return false;  // Resolved / Rejected are terminal.
+    // Reopen (9 Nov 2026, handoff-2 phase 2): Resolved / Rejected are
+    // no longer terminal. An Admin — and only an Admin, because the
+    // status endpoint already requires the Admin role — can send a
+    // closed complaint back to triage (Under Review, not Submitted:
+    // it has already been triaged once). The change is recorded in
+    // status_history and admin_actions like any other status change,
+    // so undo restores the closed status.
+    if (oldStatus == ComplaintStatus::Resolved || oldStatus == ComplaintStatus::Rejected)
+        return newStatus == ComplaintStatus::UnderReview;
+    return false;
 }
 
 static bool userExists(Database& db, int userId, User* found = nullptr) {
@@ -359,6 +383,15 @@ static bool savePhoto(const std::string& b64Raw, const std::string& extRaw,
     if (b64.rfind("data:", 0) == 0 && comma != std::string::npos) b64 = b64.substr(comma + 1);
     std::vector<unsigned char> bytes = base64Decode(b64);
     if (bytes.empty() || bytes.size() > 5 * 1024 * 1024) return false;
+    // Magic-byte check (9 Nov 2026, handoff-2 phase 2): the extension
+    // alone does not prove a file is a photo — without this, any bytes
+    // (including a script) could be stored as ".jpg" and served back.
+    // JPEG must start FF D8 FF, PNG must start 89 50 4E 47.
+    if (ext == "jpg") {
+        if (bytes.size() < 3 || bytes[0] != 0xFF || bytes[1] != 0xD8 || bytes[2] != 0xFF) return false;
+    } else {  // png
+        if (bytes.size() < 4 || bytes[0] != 0x89 || bytes[1] != 0x50 || bytes[2] != 0x4E || bytes[3] != 0x47) return false;
+    }
     std::error_code ec;
     std::filesystem::create_directories("uploads", ec);
     relPath = "uploads/" + trackingCode + "." + ext;
@@ -620,6 +653,13 @@ static std::string expiryIn24h() {
 // password yet (first run after the upgrade). These are DEMO
 // passwords for a student project — change them after first login
 // in any real use. Admin: admin123, Citizen: ali123, Staff: staff123.
+//
+// Isolation from deployment (9 Nov 2026, handoff-2 phase 2):
+// seeding is skipped entirely when CIVICFIX_DEMO_SEED=0. A
+// deployment MUST set that and rotate/disable the demo accounts —
+// never run a pilot with predictable passwords. With seeding off,
+// an empty-hash user simply cannot log in until an Admin resets
+// their password (POST /api/users/{id}/reset-password).
 static void seedDefaultPasswords(Database& db) {
     for (const User& u : db.getAllUsers()) {
         if (!u.passwordHash.empty()) continue;
@@ -746,9 +786,21 @@ static Response handleRequest(Database& db, const std::string& method,
     std::vector<std::string> p = splitPath(path);
     auto bad = [](const std::string& msg) { return Response{400, errorJson(msg)}; };
 
-    // GET /api/health
+    // GET /api/health — process health only: the server is up and
+    // answering. It says nothing about the database (a fresh path
+    // used to return 200 here while registration failed with 500).
     if (method == "GET" && p.size() == 2 && p[0] == "api" && p[1] == "health")
         return {200, "{\"status\":\"ok\",\"service\":\"CivicFix Pakistan\"}"};
+
+    // GET /api/ready — database readiness (9 Nov 2026, handoff-2
+    // phase 1): 200 only when all core tables exist (Database::
+    // isReady), otherwise 503. Deployments and the frontend's
+    // "is the service usable?" check should use this, not /health.
+    if (method == "GET" && p.size() == 2 && p[0] == "api" && p[1] == "ready") {
+        if (db.isReady())
+            return {200, "{\"status\":\"ready\",\"service\":\"CivicFix Pakistan\"}"};
+        return {503, "{\"status\":\"not_ready\",\"service\":\"CivicFix Pakistan\"}"};
+    }
 
     // GET /api/areas
     if (method == "GET" && p.size() == 2 && p[0] == "api" && p[1] == "areas")
@@ -870,6 +922,49 @@ static Response handleRequest(Database& db, const std::string& method,
             }
             return {201, userJson(u)};
         }
+    }
+
+    // POST /api/users/{id}/disable, /enable, /reset-password
+    // (9 Nov 2026, handoff-2 phase 2 — operator revocation and
+    // recovery). Admin only. Disable sets is_active = 0 AND deletes
+    // all of the user's sessions, and the session check also requires
+    // is_active = 1, so a live token dies immediately, not at the
+    // next login. Reset-password also deletes all sessions. An Admin
+    // cannot disable their own account (400): that would leave no
+    // Admin to re-enable anyone. There is no self-service reset —
+    // recovery is operator-assisted through this endpoint.
+    if (method == "POST" && p.size() == 4 && p[0] == "api" && p[1] == "users" && isNumber(p[2]) &&
+        (p[3] == "disable" || p[3] == "enable" || p[3] == "reset-password")) {
+        Response denied;
+        if (!requireRole(db, actorId, UserRole::Admin, "manage user access", denied))
+            return denied;
+        int userId = std::stoi(p[2]);
+        User target;
+        if (!userExists(db, userId, &target)) return {404, errorJson("User not found")};
+        if (p[3] == "disable") {
+            if (userId == actorId) return bad("An Admin cannot disable their own account");
+            if (!db.setUserActive(userId, false)) return {500, errorJson("Could not disable user")};
+            db.deleteSessionsForUser(userId);
+            User updated;
+            userExists(db, userId, &updated);
+            return {200, userJson(updated)};
+        }
+        if (p[3] == "enable") {
+            if (!db.setUserActive(userId, true)) return {500, errorJson("Could not enable user")};
+            User updated;
+            userExists(db, userId, &updated);
+            return {200, userJson(updated)};
+        }
+        // reset-password
+        std::string password;
+        if (!jsonGetString(body, "password", password) || password.size() < 6)
+            return bad("password is required (at least 6 characters)");
+        if (!db.setUserPasswordHash(userId, hashPassword(password)))
+            return {500, errorJson("Could not reset password")};
+        db.deleteSessionsForUser(userId);
+        User updated;
+        userExists(db, userId, &updated);
+        return {200, userJson(updated)};
     }
 
     // POST /api/complaints, GET /api/complaints
@@ -1006,11 +1101,12 @@ static Response handleRequest(Database& db, const std::string& method,
         std::string ct = (file.size() >= 4 && file.substr(file.size() - 4) == ".png") ? "image/png" : "image/jpeg";
         return {200, bytes, ct};
     }
-    // GET /api/complaints/track/{code}
+    // GET /api/complaints/track/{code} — public, but minimal (see
+    // publicTrackingJson): tracking code, status, last update only.
     if (method == "GET" && p.size() == 4 && p[0] == "api" && p[1] == "complaints" && p[2] == "track") {
         Complaint c;
         if (!db.getComplaintByTrackingCode(p[3], c)) return {404, errorJson("Complaint not found")};
-        return {200, complaintJson(c)};
+        return {200, publicTrackingJson(c)};
     }
 
     // GET /api/complaints/{id}, GET .../history, PATCH/PUT .../status
@@ -1159,11 +1255,19 @@ static Response handleRequest(Database& db, const std::string& method,
             return denied;
         std::vector<Complaint> all = db.getAllComplaints();
         std::map<std::string, int> byStatus, byCategory;
-        int resolved = 0;
+        int resolved = 0, pending = 0;
         for (const Complaint& c : all) {
             byStatus[toString(c.status)]++;
             byCategory[toString(c.category)]++;
             if (c.status == ComplaintStatus::Resolved) resolved++;
+            // Baseline fix, 9 Nov 2026 (handoff-2 phase 1): pending
+            // used to be total - resolved, so Rejected complaints
+            // counted as still pending. Pending now means active:
+            // neither Resolved nor Rejected — the same rule the
+            // work queue already used. Acceptance: 1 Submitted +
+            // 1 Rejected + 1 Resolved => pending 1, queue 1.
+            if (c.status != ComplaintStatus::Resolved &&
+                c.status != ComplaintStatus::Rejected) pending++;
         }
         auto mapJson = [](const std::map<std::string, int>& m) {
             std::string out = "{";
@@ -1178,7 +1282,7 @@ static Response handleRequest(Database& db, const std::string& method,
         };
         return {200, "{\"totalComplaints\":" + std::to_string(all.size()) +
                       ",\"resolvedComplaints\":" + std::to_string(resolved) +
-                      ",\"pendingComplaints\":" + std::to_string(static_cast<int>(all.size()) - resolved) +
+                      ",\"pendingComplaints\":" + std::to_string(pending) +
                       ",\"totalUsers\":" + std::to_string(db.getAllUsers().size()) +
                       ",\"totalAreas\":" + std::to_string(db.getAllAreas().size()) +
                       ",\"byStatus\":" + mapJson(byStatus) +
@@ -1374,7 +1478,17 @@ int main(int argc, char* argv[]) {
 
     Database db;
     if (!db.connect(dbPath)) return 1;
-    seedDefaultPasswords(db);
+    // Demo-password seeding is on by default for local development,
+    // and off when CIVICFIX_DEMO_SEED=0 (deployments must set this).
+    {
+        const char* demoSeed = std::getenv("CIVICFIX_DEMO_SEED");
+        if (demoSeed != nullptr && std::string(demoSeed) == "0") {
+            std::cout << "Demo password seeding DISABLED (CIVICFIX_DEMO_SEED=0). "
+                         "Users without a password cannot log in until an Admin resets theirs.\n";
+        } else {
+            seedDefaultPasswords(db);
+        }
+    }
 
     socket_t serverSocket = socket(AF_INET, SOCK_STREAM, 0);
     if (serverSocket == SOCKET_INVALID) {

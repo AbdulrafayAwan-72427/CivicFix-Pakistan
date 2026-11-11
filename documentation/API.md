@@ -95,7 +95,19 @@ Trade-offs to know for the viva:
   `CFX-7K3M9P`, 6 characters, no 0/O/1/I) instead of sequential
   `CFX-101, 102, …`, so they cannot be counted through on the
   public tracking endpoint. Old codes (`CFX-101/102/103`) keep
-  working as before.
+  working as before. **Public tracking is minimal (9 Nov 2026):**
+  it returns only `trackingCode`, `status` and `updatedAt` — no
+  citizen id, description, coordinates or photo path. Logged-in
+  views still return the full complaint.
+  **Readiness (9 Nov 2026):** `GET /api/health` is process-only
+  (the server is up). `GET /api/ready` is the database check:
+  200 `{"status":"ready"}` when all core tables exist, 503
+  `{"status":"not_ready"}` otherwise. A fresh database path now
+  creates all core tables and seeds the five Lahore areas on
+  first start, so registration works on an empty database.
+  **Pending count (9 Nov 2026):** `GET /api/stats` counts
+  `pendingComplaints` as active complaints only — not Resolved
+  and not Rejected — the same rule the work queue uses.
 
 ## Map, photos and AI (added 5 Nov 2026)
 
@@ -107,7 +119,10 @@ Trade-offs to know for the viva:
   my location"), and the Admin page has a map with a pin per
   located complaint — click a pin to open it.
 - **Photos:** `POST /api/complaints` accepts `photoBase64` +
-  `photoExt` (`jpg`/`png`, under 5 MB). The server saves the file
+  `photoExt` (`jpg`/`png`, under 5 MB). The decoded bytes must
+  also start with the right magic bytes (JPEG `FF D8 FF`, PNG
+  `89 50 4E 47`) — an extension alone does not prove a file is a
+  photo (9 Nov 2026). The server saves the file
   under `uploads/<trackingCode>.<ext>` (gitignored) and stores
   that path in `photo_path`. `GET /uploads/<file>` serves it back
   (the Vite proxy forwards `/uploads` to the API). Existing
@@ -175,16 +190,20 @@ Base URL: `http://localhost:8080`
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| GET | `/api/health` | Health check (public) |
+| GET | `/api/health` | Health check, process only (public) |
+| GET | `/api/ready` | Database readiness: 200 ready, 503 not ready (public) |
 | GET | `/api/areas` | List areas (public) |
 | GET | `/api/users` | List users (login; Admin sees full records, others id/name/role only) |
 | POST | `/api/users` | Register a user, Admin only (409 if email exists) |
 | GET | `/api/complaints` | List complaints; `?status=`, `?category=`, `?sort=priority` (login; Citizen sees only their own) |
 | POST | `/api/complaints` | Submit a complaint, Citizen only; tracking code is auto-generated and random (e.g. CFX-7K3M9P) |
 | GET | `/api/complaints/{id}` | One complaint (login; Citizen own only) |
-| GET | `/api/complaints/track/{code}` | Track by code, e.g. CFX-102 (public) |
+| GET | `/api/complaints/track/{code}` | Track by code, e.g. CFX-102 (public; returns trackingCode, status, updatedAt only) |
 | GET | `/api/complaints/{id}/history` | Permanent status history (login; Citizen own only) |
-| PATCH or PUT | `/api/complaints/{id}/status` | Change status, Admin only (validated transition) |
+| PATCH or PUT | `/api/complaints/{id}/status` | Change status, Admin only (validated transition; includes reopen, see below) |
+| POST | `/api/users/{id}/disable` | Disable a user and delete all their sessions (Admin only; cannot disable yourself) |
+| POST | `/api/users/{id}/enable` | Re-enable a disabled user (Admin only) |
+| POST | `/api/users/{id}/reset-password` | Set a new password `{"password": "..."}` (min 6 chars) and delete all their sessions (Admin only; no self-service reset) |
 | POST | `/api/assignments` | Assign a Staff user to a complaint, Admin only |
 | GET | `/api/admin/actions` | All admin actions, newest first (Admin only) |
 | GET | `/api/admin/actions/latest` | Latest pending (not undone) action (Admin only) |
@@ -200,8 +219,15 @@ Submitted    -> Under Review, Rejected
 Under Review -> Assigned, Rejected
 Assigned     -> In Progress, Rejected
 In Progress  -> Resolved, Rejected
-Resolved / Rejected -> (terminal, no further change)
+Resolved     -> Under Review (reopen, Admin only, 9 Nov 2026)
+Rejected     -> Under Review (reopen, Admin only, 9 Nov 2026)
 ```
+
+Reopening sends a closed complaint back to triage (Under Review,
+not Submitted). It is recorded in `status_history` and
+`admin_actions` like any other status change, so undo restores the
+closed status. Staff and Citizens cannot reopen (403 — the status
+endpoint is Admin only).
 
 An invalid transition returns `400` and changes nothing. Persistent
 undo bypasses this on purpose: undo restores the previous status even

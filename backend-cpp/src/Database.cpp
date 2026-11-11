@@ -45,6 +45,104 @@ bool Database::connect(const std::string& path) {
         return false;
     }
 
+    // Baseline fix, 9 Nov 2026 (handoff-2, phase 1): a fresh database
+    // path used to start "healthy" (/api/health 200) but registration
+    // then failed with 500, because only admin_actions and sessions
+    // were created here -- users, areas, complaints and the rest did
+    // not exist. Create every core table from database/schema.sql
+    // (IF NOT EXISTS, so an existing seeded database is untouched),
+    // then seed the Lahore areas if the areas table is empty, so a
+    // fresh database can register a user (default areaId 1) at once.
+    // The password_hash / latitude / AI columns below are still added
+    // by ALTER TABLE for databases created from the older schema.
+    const char* createCoreTables[] = {
+        "CREATE TABLE IF NOT EXISTS users ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "full_name TEXT NOT NULL,"
+        "email TEXT UNIQUE NOT NULL,"
+        "phone TEXT,"
+        "role TEXT NOT NULL CHECK(role IN ('Citizen', 'Admin', 'Staff')),"
+        "area_id INTEGER,"
+        "is_active INTEGER DEFAULT 1,"
+        "FOREIGN KEY (area_id) REFERENCES areas(id)"
+        ");",
+        "CREATE TABLE IF NOT EXISTS areas ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "name TEXT NOT NULL,"
+        "city TEXT NOT NULL,"
+        "province TEXT NOT NULL"
+        ");",
+        "CREATE TABLE IF NOT EXISTS complaints ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "tracking_code TEXT UNIQUE NOT NULL,"
+        "citizen_id INTEGER NOT NULL,"
+        "title TEXT NOT NULL,"
+        "description TEXT NOT NULL,"
+        "category TEXT NOT NULL,"
+        "priority_score INTEGER CHECK(priority_score BETWEEN 1 AND 5),"
+        "area_id INTEGER NOT NULL,"
+        "photo_path TEXT,"
+        "status TEXT DEFAULT 'Submitted',"
+        "created_at TEXT DEFAULT CURRENT_TIMESTAMP,"
+        "updated_at TEXT DEFAULT CURRENT_TIMESTAMP,"
+        "FOREIGN KEY (citizen_id) REFERENCES users(id),"
+        "FOREIGN KEY (area_id) REFERENCES areas(id)"
+        ");",
+        "CREATE TABLE IF NOT EXISTS status_history ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "complaint_id INTEGER NOT NULL,"
+        "changed_by_user_id INTEGER NOT NULL,"
+        "old_status TEXT NOT NULL,"
+        "new_status TEXT NOT NULL,"
+        "notes TEXT,"
+        "created_at TEXT DEFAULT CURRENT_TIMESTAMP,"
+        "FOREIGN KEY (complaint_id) REFERENCES complaints(id),"
+        "FOREIGN KEY (changed_by_user_id) REFERENCES users(id)"
+        ");",
+        "CREATE TABLE IF NOT EXISTS assignments ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "complaint_id INTEGER NOT NULL,"
+        "staff_id INTEGER NOT NULL,"
+        "assigned_by_admin_id INTEGER NOT NULL,"
+        "assigned_at TEXT DEFAULT CURRENT_TIMESTAMP,"
+        "unassigned_at TEXT,"
+        "FOREIGN KEY (complaint_id) REFERENCES complaints(id),"
+        "FOREIGN KEY (staff_id) REFERENCES users(id),"
+        "FOREIGN KEY (assigned_by_admin_id) REFERENCES users(id)"
+        ");",
+        "CREATE TABLE IF NOT EXISTS ai_predictions ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "complaint_id INTEGER NOT NULL,"
+        "predicted_category TEXT NOT NULL,"
+        "confidence REAL NOT NULL,"
+        "model_version TEXT,"
+        "predicted_at TEXT DEFAULT CURRENT_TIMESTAMP,"
+        "admin_override INTEGER DEFAULT 0,"
+        "FOREIGN KEY (complaint_id) REFERENCES complaints(id)"
+        ");",
+    };
+    for (const char* sql : createCoreTables) {
+        if (!execute(sql)) {
+            std::cerr << "Could not create a core table.\n";
+            disconnect();
+            return false;
+        }
+    }
+    // Seed the same five Lahore areas as the seeded database, with
+    // the same ids, but only when the table is empty. INSERT OR
+    // IGNORE keeps an existing seeded database untouched.
+    if (!execute(
+            "INSERT OR IGNORE INTO areas (id, name, city, province) VALUES "
+            "(1, 'Gulberg', 'Lahore', 'Punjab'),"
+            "(5, 'Model Town', 'Lahore', 'Punjab'),"
+            "(6, 'Johar Town', 'Lahore', 'Punjab'),"
+            "(7, 'DHA Phase 5', 'Lahore', 'Punjab'),"
+            "(8, 'Faisal Town', 'Lahore', 'Punjab');")) {
+        std::cerr << "Could not seed areas.\n";
+        disconnect();
+        return false;
+    }
+
     // Persistent Admin Action Stack.
     const char* createActionsTable =
         "CREATE TABLE IF NOT EXISTS admin_actions ("
@@ -122,6 +220,20 @@ bool Database::connect(const std::string& path) {
 
     std::cout << "Database connected successfully.\n";
     return true;
+}
+
+bool Database::isReady() {
+    if (db == nullptr) return false;
+    const char* sql =
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN "
+        "('users', 'areas', 'complaints', 'status_history', 'assignments', "
+        "'ai_predictions', 'admin_actions', 'sessions');";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    int count = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW) count = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return count == 8;
 }
 
 void Database::disconnect() {
@@ -1615,7 +1727,7 @@ bool Database::getSessionUser(const std::string& token, User& user) {
     const char* sql =
         "SELECT u.id, u.full_name, u.email, u.phone, u.role, u.area_id, u.is_active, u.password_hash "
         "FROM users u JOIN sessions s ON s.user_id = u.id "
-        "WHERE s.token = ? AND s.expires_at > datetime('now');";
+        "WHERE s.token = ? AND s.expires_at > datetime('now') AND u.is_active = 1;";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
     sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_TRANSIENT);
@@ -1639,6 +1751,29 @@ bool Database::getSessionUser(const std::string& token, User& user) {
     }
     sqlite3_finalize(stmt);
     return found;
+}
+
+bool Database::deleteSessionsForUser(int userId) {
+    if (db == nullptr) return false;
+    const char* sql = "DELETE FROM sessions WHERE user_id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_int(stmt, 1, userId);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+bool Database::setUserActive(int userId, bool active) {
+    if (db == nullptr) return false;
+    const char* sql = "UPDATE users SET is_active = ? WHERE id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_int(stmt, 1, active ? 1 : 0);
+    sqlite3_bind_int(stmt, 2, userId);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return ok;
 }
 
 bool Database::deleteSession(const std::string& token) {

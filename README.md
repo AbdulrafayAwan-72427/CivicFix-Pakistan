@@ -199,6 +199,39 @@ stop the old one and rebuild from the current source before
 demoing, and check protected endpoints return 401 without a
 token, not just that `/api/health` answers.
 
+**Baseline fixes (9 Nov 2026):** a product handoff re-checked the
+app against the audited revision and found four real baseline
+faults, now fixed. A fresh database used to answer `/api/health`
+while registration failed with 500 — the server now creates all
+core tables on first start (and seeds the five Lahore areas), and
+`GET /api/ready` reports whether the database can actually serve
+requests (200 ready, 503 not ready); `/api/health` stays a
+process-only check. The admin "pending" count used to include
+rejected complaints; pending now means active (not Resolved and
+not Rejected), matching the work queue. Public tracking by code
+now returns only tracking code, status and last update — no
+citizen id, description, coordinates or photo path. And a photo
+URL bug is fixed: on a deployed frontend whose API base ended in
+`/api`, `/uploads/...` was mangled to `/apioads/...` and photos
+never loaded; the URL helper now only strips `/api` from
+endpoints that start with it. The admin Actions panel no longer
+promises assignment events — the backend only logs status
+changes there.
+
+**Privacy and pilot gate (9 Nov 2026):** the permissions matrix
+is now written down in `documentation/PERMISSIONS.md` and enforced
+server-side — citizens see only their own complaints, staff see
+cases but cannot change status or assign, admins run triage,
+assignment, reopen and user management. An admin can reopen a
+Resolved or Rejected complaint back to Under Review, disable a
+user (their logins stop working at once), and reset a password
+when someone is locked out — there is no self-service reset.
+Demo-password seeding can be switched off with
+`CIVICFIX_DEMO_SEED=0` for deployments, and photo uploads are
+checked against their real file type, not just the extension.
+Backup and restore are documented in
+`documentation/BACKUP.md` and were tested with a real photo.
+
 Still to do before public use: change the demo passwords, and
 a hosted deployment — see `documentation/DEPLOYMENT.md`. The photo
 categorisation is a general-purpose image classifier used as a

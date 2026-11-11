@@ -143,6 +143,23 @@ export default function AdminPage({ currentUser, users, areas = [], onUsersChang
     } catch (err) { setStaffError(err.message) } finally { setStaffBusy(false) }
   }
 
+  // Disable / enable a staff member (9 Nov 2026, handoff-2 phase 2).
+  // Disable deletes all of their sessions, so a live login stops
+  // working at once. The Admin cannot disable their own account —
+  // the API returns 400 — and staff rows are the only ones with the
+  // button, so this never touches the Admin themself here.
+  async function toggleStaffActive(u) {
+    if (staffBusy) return
+    setStaffMsg(''); setStaffError('')
+    setStaffBusy(true)
+    try {
+      const action = u.isActive === false ? 'enable' : 'disable'
+      const updated = await post(`/api/users/${u.id}/${action}`, {})
+      setStaffMsg(`${updated.fullName} is now ${updated.isActive === false ? 'disabled — their logins have been revoked' : 'active again'}.`)
+      if (onUsersChanged) await onUsersChanged()
+    } catch (err) { setStaffError(err.message) } finally { setStaffBusy(false) }
+  }
+
   // One-click demo staff, for testing assignment quickly. If a demo
   // staff member already exists, the API returns 409 "User already
   // exists" — that is treated as "already there", not a failure.
@@ -422,7 +439,7 @@ export default function AdminPage({ currentUser, users, areas = [], onUsersChang
         <div className="card" id="team-card">
           <h2>Team — Staff members</h2>
           <p className="small">
-            Add a staff member here. They appear in the assignment dropdown above and can log in with the password you set.
+            Add a staff member here. They appear in the assignment dropdown above and can log in with the password you set. Disabling a staff member revokes their logins immediately.
           </p>
           {staffUsers.length === 0 ? (
             <EmptyState icon="👥" title="No staff members yet" hint="Add one below to make assignment work." />
@@ -430,10 +447,10 @@ export default function AdminPage({ currentUser, users, areas = [], onUsersChang
             <div className="table-wrap">
               <table>
                 <caption className="sr-only">Staff members</caption>
-                <thead><tr><th scope="col">Name</th><th scope="col">Email</th><th scope="col">Phone</th><th scope="col">Area</th><th scope="col">ID</th></tr></thead>
+                <thead><tr><th scope="col">Name</th><th scope="col">Email</th><th scope="col">Phone</th><th scope="col">Area</th><th scope="col">ID</th><th scope="col">Status</th><th scope="col"><span className="sr-only">Access</span></th></tr></thead>
                 <tbody>
                   {staffUsers.map((u) => (
-                    <tr key={u.id}><td><strong>{u.fullName}</strong></td><td>{u.email}</td><td>{u.phone || '—'}</td><td>{areaShort(areas, u.areaId)}</td><td>{u.id}</td></tr>
+                    <tr key={u.id}><td><strong>{u.fullName}</strong></td><td>{u.email}</td><td>{u.phone || '—'}</td><td>{areaShort(areas, u.areaId)}</td><td>{u.id}</td><td>{u.isActive === false ? 'Disabled' : 'Active'}</td><td><button type="button" className="secondary small" onClick={() => toggleStaffActive(u)} disabled={staffBusy}>{u.isActive === false ? 'Enable' : 'Disable'}</button></td></tr>
                   ))}
                 </tbody>
               </table>
@@ -482,7 +499,7 @@ export default function AdminPage({ currentUser, users, areas = [], onUsersChang
           )}
           <div className="table-wrap mt-12">
             <table>
-              <caption className="sr-only">Admin actions, newest first</caption>
+              <caption className="sr-only">Admin status changes, newest first</caption>
               <thead><tr><th scope="col">Complaint</th><th scope="col">From</th><th scope="col">To</th><th scope="col">Undone?</th></tr></thead>
               <tbody>
                 {actions.map((a) => (
@@ -492,7 +509,7 @@ export default function AdminPage({ currentUser, users, areas = [], onUsersChang
             </table>
           </div>
           {actions.length === 0 && !loading && (
-            <EmptyState icon="↩️" title="No admin actions yet" hint="Status changes and assignments will appear here." />
+            <EmptyState icon="↩️" title="No admin actions yet" hint="Status changes will appear here. Assignments are not recorded here — the backend only logs status changes." />
           )}
         </div>
       )}

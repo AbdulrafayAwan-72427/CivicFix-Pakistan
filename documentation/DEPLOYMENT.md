@@ -117,16 +117,32 @@ Done already (verified on 8 Nov 2026):
 - [x] C++ API → ML service call wired in (React still must not call
       ML directly)
 
+Done already (verified on 9 Nov 2026, handoff-2 phase 2 — see
+`documentation/PERMISSIONS.md` for the full matrix):
+
+- [x] Permissions matrix written down and tested (role boundaries,
+      reopen, disable/enable, password reset)
+- [x] Public tracking returns only tracking code, status and last
+      update; Admin-only reopen of Resolved/Rejected complaints
+- [x] Operator revocation: disabling a user deletes all their
+      sessions and live tokens die at once; password reset also
+      deletes sessions; no self-service reset
+- [x] Demo-password seeding can be disabled with
+      `CIVICFIX_DEMO_SEED=0`; upload magic-byte checks (JPEG/PNG)
+- [x] Backup + restore runbook (`documentation/BACKUP.md`),
+      restore tested with a real photo upload
+
 Still to do:
 
 - [ ] Rebuild the API from the current source and restart it — do
       not keep running an older `civicfix_api.exe` from before the
       security fixes (check every protected endpoint returns 401
       without a token after each rebuild, not just `/api/health`)
-- [ ] Change or disable the seeded demo passwords
-      (`admin@civicfix.pk` / `admin123`, `ali@example.com` /
-      `ali123`); never deploy with public default passwords, and
-      do not publish real user data in a seed database
+- [ ] Set `CIVICFIX_DEMO_SEED=0` on any deployment, and change or
+      disable the seeded demo passwords (`admin@civicfix.pk` /
+      `admin123`, `ali@example.com` / `ali123`); never deploy with
+      public default passwords, and do not publish real user data
+      in a seed database
 - [ ] Set `CIVICFIX_ALLOWED_ORIGINS` to the real frontend origin(s)
 - [ ] Persistent storage for the database (volume or PostgreSQL)
 - [ ] HTTPS on every public URL

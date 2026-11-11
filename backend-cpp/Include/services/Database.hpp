@@ -26,6 +26,13 @@ public:
     bool connect(const std::string& path);
     void disconnect();
 
+    // Readiness (9 Nov 2026, handoff-2 phase 1): true only when all
+    // eight core tables exist. /api/health stays process-only ("the
+    // server is up"); /api/ready uses this ("the database can serve
+    // requests"). A fresh path that only created admin_actions and
+    // sessions used to report healthy while registration failed.
+    bool isReady();
+
     bool execute(const std::string& sql);
 
     sqlite3* getConnection() const;
@@ -72,6 +79,10 @@ public:
     bool createSession(int userId, const std::string& token, const std::string& expiresAt);
     bool getSessionUser(const std::string& token, User& user);
     bool deleteSession(const std::string& token);
+    // Revocation (9 Nov 2026, handoff-2 phase 2): delete every
+    // session of one user, and enable/disable their account.
+    bool deleteSessionsForUser(int userId);
+    bool setUserActive(int userId, bool active);
     bool getComplaintByTrackingCode(const std::string& trackingCode, Complaint& complaint);
     std::vector<Area> getAllAreas();
     std::vector<User> getAllUsers();

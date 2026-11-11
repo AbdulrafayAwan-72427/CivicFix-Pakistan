@@ -35,8 +35,18 @@ const API_BASE = configured !== undefined
 
 export function apiUrl(endpoint) {
   if (API_BASE === '') return endpoint
-  if (API_BASE.endsWith('/api')) return API_BASE + endpoint.slice(4)
-  return API_BASE + endpoint
+  const base = API_BASE.replace(/\/$/, '')
+  // Baseline fix, 9 Nov 2026 (handoff-2 phase 1): the old code stripped
+  // the first 4 characters of EVERY endpoint when the base ended in
+  // '/api', which is only right for '/api/...' endpoints. A photo path
+  // '/uploads/demo.png' became '/apioads/demo.png' and the photo never
+  // loaded on a deployed frontend. Only strip the '/api' prefix from
+  // endpoints that actually start with it; anything else is appended
+  // to the server root as-is.
+  if (base.endsWith('/api') && endpoint.startsWith('/api/'))
+    return base + endpoint.slice(4)
+  if (base.endsWith('/api')) return base.slice(0, -4) + endpoint
+  return base + endpoint
 }
 
 export async function api(endpoint, options = {}) {
@@ -120,6 +130,9 @@ export const NEXT_STATUSES = {
   'Under Review': ['Assigned', 'Rejected'],
   Assigned: ['In Progress', 'Rejected'],
   'In Progress': ['Resolved', 'Rejected'],
-  Resolved: [],
-  Rejected: [],
+  // Reopen (9 Nov 2026, handoff-2 phase 2): Admin only, back to
+  // triage. The API enforces the Admin role; this list only decides
+  // what the dropdown offers.
+  Resolved: ['Under Review'],
+  Rejected: ['Under Review'],
 }
