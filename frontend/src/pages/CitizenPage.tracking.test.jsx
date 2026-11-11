@@ -14,7 +14,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor, within, cleanup } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import CitizenPage from './CitizenPage.jsx'
-import { get } from '../api.js'
+import { get, post } from '../api.js'
+
+// jsdom has no scrollIntoView implementation; stub it so the
+// "Track this complaint" scroll does not spam the console.
+Element.prototype.scrollIntoView = vi.fn()
 
 vi.mock('../api.js', async (importOriginal) => {
   const orig = await importOriginal()
@@ -180,5 +184,103 @@ describe('authenticated My complaints (full details preserved)', () => {
     await user.click(historyButton)
     await waitFor(() => expect(screen.getByText('Submitted → Under Review')).toBeTruthy())
     expect(get.mock.calls.map(([url]) => url)).toContain('/api/complaints/2/history')
+  })
+})
+
+describe('submit a complaint (Civic Ledger)', () => {
+  const CREATED = {
+    id: 5, citizenId: 1, trackingCode: 'CFX-6JNQ86', title: 'Overflowing bins',
+    description: 'Bins overflowing on our street', category: 'Garbage Collection',
+    status: 'Submitted', priorityScore: 3, areaId: 1,
+    aiSuggestedCategory: 'Garbage Collection', aiConfidence: 0.8,
+    createdAt: '2026-11-11 08:04:03', updatedAt: '2026-11-11 08:04:03',
+  }
+
+  async function fillAndSubmit(user) {
+    await user.type(screen.getByLabelText(/Title/), 'Overflowing bins')
+    await user.type(screen.getByLabelText(/describe the problem/i), 'Bins overflowing on our street')
+    await user.selectOptions(screen.getByLabelText(/Area/), '1')
+    await user.click(screen.getByRole('button', { name: 'Submit complaint' }))
+  }
+
+  it('uses the Ledger theme and keeps every field, validation and map label', () => {
+    render(<CitizenPage currentUser={CURRENT_USER} areas={AREAS} users={[]} />)
+    const section = document.getElementById('submit-card')
+    expect(section.className).toContain('civic-ledger')
+    expect(within(section).getByText('Submit a complaint')).toBeTruthy()
+    expect(screen.getByLabelText(/Title/)).toBeTruthy()
+    expect(screen.getByLabelText(/describe the problem/i)).toBeTruthy()
+    expect(screen.getByLabelText('Category')).toBeTruthy()
+    expect(screen.getByLabelText(/how urgent is this/i)).toBeTruthy()
+    expect(screen.getByLabelText(/Area/)).toBeTruthy()
+    expect(screen.getByLabelText(/photo of the problem/i)).toBeTruthy()
+    expect(screen.getByText(/where is it/i)).toBeTruthy()
+    // Required validation is preserved on the same fields.
+    expect(screen.getByLabelText(/Title/).required).toBe(true)
+    expect(screen.getByLabelText(/describe the problem/i).required).toBe(true)
+    expect(screen.getByLabelText(/Area/).required).toBe(true)
+    // No duplicate nav was added with the theme.
+    expect(document.querySelector('.ledger-nav')).toBeNull()
+  })
+
+  it('sends the same payload and shows a copyable code', async () => {
+    const user = userEvent.setup()
+    post.mockResolvedValue(CREATED)
+    render(<CitizenPage currentUser={CURRENT_USER} areas={AREAS} users={[]} />)
+    await fillAndSubmit(user)
+
+    await waitFor(() => expect(screen.getByText('Complaint submitted')).toBeTruthy())
+    expect(post).toHaveBeenCalledWith('/api/complaints', expect.objectContaining({
+      citizenId: 1,
+      title: 'Overflowing bins',
+      description: 'Bins overflowing on our street',
+      category: 'Garbage Collection',
+      severity: 'normal',
+      areaId: 1,
+    }))
+    const codeInput = screen.getByLabelText(/your tracking code/i)
+    expect(codeInput.value).toBe('CFX-6JNQ86')
+    expect(codeInput.readOnly).toBe(true)
+    expect(screen.getByText(/Suggested category: Garbage Collection \(80% sure\)/)).toBeTruthy()
+  })
+
+  it('copies the code and tracks the new report from the success card', async () => {
+    const user = userEvent.setup()
+    const writeText = vi.fn().mockResolvedValue()
+    // navigator.clipboard is getter-only in jsdom — define it.
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    post.mockResolvedValue(CREATED)
+    get.mockImplementation((url) => {
+      if (url === '/api/complaints') return Promise.resolve([])
+      if (url === '/api/complaints/track/CFX-6JNQ86') {
+        return Promise.resolve({ trackingCode: 'CFX-6JNQ86', status: 'Submitted', updatedAt: '2026-11-11 08:04:03' })
+      }
+      return Promise.reject(new Error(`unexpected GET ${url}`))
+    })
+    render(<CitizenPage currentUser={CURRENT_USER} areas={AREAS} users={[]} />)
+    await fillAndSubmit(user)
+    await waitFor(() => expect(screen.getByText('Complaint submitted')).toBeTruthy())
+
+    await user.click(screen.getByRole('button', { name: 'Copy code' }))
+    expect(writeText).toHaveBeenCalledWith('CFX-6JNQ86')
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Copied' })).toBeTruthy())
+
+    await user.click(screen.getByRole('button', { name: 'Track this complaint' }))
+    await waitFor(() => expect(screen.getByText('Complaint CFX-6JNQ86')).toBeTruthy())
+    // The status is inside a <strong> in the summary line.
+    expect(within(trackSection()).getByText('Submitted')).toBeTruthy()
+    expect(get.mock.calls.map(([url]) => url)).toContain('/api/complaints/track/CFX-6JNQ86')
+    expect(Element.prototype.scrollIntoView).toHaveBeenCalled()
+  })
+
+  it('keeps the form and shows the error when submit fails', async () => {
+    const user = userEvent.setup()
+    post.mockRejectedValue(new Error('Area is required'))
+    render(<CitizenPage currentUser={CURRENT_USER} areas={AREAS} users={[]} />)
+    await fillAndSubmit(user)
+
+    await waitFor(() => expect(screen.getByText('Area is required')).toBeTruthy())
+    expect(screen.queryByText('Complaint submitted')).toBeNull()
+    expect(screen.getByLabelText(/Title/).value).toBe('Overflowing bins')
   })
 })

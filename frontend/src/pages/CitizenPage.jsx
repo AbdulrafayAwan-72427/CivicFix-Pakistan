@@ -32,6 +32,8 @@ export default function CitizenPage({ currentUser, areas, users = [] }) {
   const [submitMsg, setSubmitMsg] = useState('')
   const [submitError, setSubmitError] = useState('')
   const [submitBusy, setSubmitBusy] = useState(false)
+  const [submittedCode, setSubmittedCode] = useState('')
+  const [copied, setCopied] = useState(false)
   const [location, setLocation] = useState({ latitude: 0, longitude: 0 })
   const [photo, setPhoto] = useState({ base64: '', ext: '', preview: '' })
 
@@ -87,9 +89,13 @@ export default function CitizenPage({ currentUser, areas, users = [] }) {
         photoExt: photo.ext || undefined,
       })
       const aiNote = created.aiSuggestedCategory
-        ? ` Suggested category: ${created.aiSuggestedCategory}${created.aiConfidence ? ` (${Math.round(created.aiConfidence * 100)}% sure)` : ''}.`
-        : ' We could not check the category automatically. An admin will review it.'
-      setSubmitMsg(`Submitted! Your tracking code is ${created.trackingCode}. Keep it to track your complaint.${aiNote}`)
+        ? `Suggested category: ${created.aiSuggestedCategory}${created.aiConfidence ? ` (${Math.round(created.aiConfidence * 100)}% sure)` : ''}.`
+        : 'We could not check the category automatically. An admin will review it.'
+      // The tracking code lives in its own copyable card below (see the
+      // success block); the message keeps only the AI note.
+      setSubmitMsg(aiNote)
+      setSubmittedCode(created.trackingCode)
+      setCopied(false)
       setForm({ title: '', description: '', category: 'Garbage Collection', severity: 'normal', areaId: '' })
       setLocation({ latitude: 0, longitude: 0 })
       setPhoto({ base64: '', ext: '', preview: '' })
@@ -101,9 +107,31 @@ export default function CitizenPage({ currentUser, areas, users = [] }) {
     }
   }
 
-  async function track(event) {
-    event.preventDefault()
+  // Copies the tracking code returned by the last successful submit.
+  // Clipboard API first, with a select-and-copy fallback for browsers
+  // without it (and for the jsdom test, which has no clipboard).
+  async function copyCode() {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(submittedCode)
+      } else {
+        const el = document.getElementById('ledger-submitted-code')
+        el?.select()
+        document.execCommand('copy')
+      }
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      setSubmitError('Could not copy the code. Select it and copy it manually.')
+    }
+  }
+
+  async function track(event, codeOverride) {
+    if (event) event.preventDefault()
     if (trackBusy) return
+    const lookupCode = (codeOverride ?? code).trim()
+    if (!lookupCode) return
+    setCode(lookupCode)
     setTracked(null)
     setTrackError('')
     setTrackBusy(true)
@@ -111,12 +139,14 @@ export default function CitizenPage({ currentUser, areas, users = [] }) {
       // Same call as before: public track-by-code, minimal response
       // (trackingCode / status / updatedAt). Permissions stay in the
       // backend; this screen never shows anyone else's complaints.
-      setTracked(await get(`/api/complaints/track/${encodeURIComponent(code.trim())}`))
+      setTracked(await get(`/api/complaints/track/${encodeURIComponent(lookupCode)}`))
     } catch (err) {
       setTrackError(err.message)
     } finally {
       setTrackBusy(false)
     }
+    // Show the result (or the error) in the tracker below.
+    document.getElementById('track-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
   async function loadMine() {
@@ -157,55 +187,100 @@ export default function CitizenPage({ currentUser, areas, users = [] }) {
       </div>
 
       <div className="grid-2">
-        <div className="card" id="submit-card">
-          <h2>Submit a complaint</h2>
-          <p className="small">You will get a tracking code when you submit.</p>
-          <form onSubmit={submit}>
-            <label>Title
-              <input placeholder="e.g. Broken road in Gulberg" value={form.title} onChange={(e) => update('title', e.target.value)} required />
-            </label>
-            <label>Describe the problem
-              <textarea placeholder="What is wrong, and where exactly?" rows="4" value={form.description} onChange={(e) => update('description', e.target.value)} required />
-            </label>
-            <label>Category
-              <select value={form.category} onChange={(e) => update('category', e.target.value)}>
-                {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
-              </select>
-            </label>
-            <label>How urgent is this?
-              <select value={form.severity} onChange={(e) => update('severity', e.target.value)}>
-                <option value="low">Not urgent — it can wait</option>
-                <option value="normal">Normal</option>
-                <option value="high">Urgent — it is unsafe or blocking people</option>
-              </select>
-            </label>
-            <label>Area
-              <select value={form.areaId} onChange={(e) => {
-                update('areaId', e.target.value)
-                const picked = areas.find((a) => String(a.id) === e.target.value)
-                if (picked && AREA_COORDS[picked.name] && !location.latitude) {
-                  setLocation({ latitude: AREA_COORDS[picked.name][0], longitude: AREA_COORDS[picked.name][1] })
-                }
-              }} required>
-                <option value="">Choose an area…</option>
-                {areas.map((a) => <option key={a.id} value={a.id}>{a.name} — {a.city}</option>)}
-              </select>
-            </label>
-            <label>Photo of the problem (optional, JPG/PNG, under 5 MB)
-              <input type="file" accept="image/jpeg,image/png" onChange={(e) => onPhotoFile(e.target.files && e.target.files[0])} />
-            </label>
-            {photo.preview && (
-              <img src={photo.preview} alt="Complaint preview" style={{ width: '100%', maxHeight: 240, objectFit: 'cover', borderRadius: 12 }} />
-            )}
-            <label>Where is it? (optional — click the map)
-              <MapPicker
-                latitude={location.latitude} longitude={location.longitude}
-                onChange={(lat, lng) => setLocation({ latitude: lat, longitude: lng })}
+        <div className="civic-ledger" id="submit-card">
+          <div className="ledger-masthead">
+            <img src="/logo.webp" alt="" aria-hidden="true" />
+            <div>
+              <p className="ledger-masthead-title">CivicFix</p>
+              <p className="ledger-masthead-sub">Civic Ledger — submit a complaint</p>
+            </div>
+          </div>
+          <LedgerCard title="Submit a complaint">
+            <p className="ledger-note">You will get a tracking code when you submit.</p>
+            <form onSubmit={submit}>
+              <LedgerField
+                label="Title"
+                placeholder="e.g. Broken road in Gulberg"
+                value={form.title}
+                onChange={(e) => update('title', e.target.value)}
+                required
               />
-            </label>
-            <button type="submit" disabled={submitBusy}>{submitBusy ? 'Submitting…' : 'Submit complaint'}</button>
-          </form>
-          <Feedback error={submitError} message={submitMsg} onClearMessage={() => setSubmitMsg('')} />
+              <LedgerField
+                label="Describe the problem"
+                hint="What is wrong, and where exactly?"
+                multiline
+                rows="4"
+                value={form.description}
+                onChange={(e) => update('description', e.target.value)}
+                required
+              />
+              <div className="ledger-field">
+                <label htmlFor="ledger-category">Category</label>
+                <select id="ledger-category" className="ledger-control" value={form.category} onChange={(e) => update('category', e.target.value)}>
+                  {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
+                </select>
+              </div>
+              <div className="ledger-field">
+                <label htmlFor="ledger-severity">How urgent is this?</label>
+                <select id="ledger-severity" className="ledger-control" value={form.severity} onChange={(e) => update('severity', e.target.value)}>
+                  <option value="low">Not urgent — it can wait</option>
+                  <option value="normal">Normal</option>
+                  <option value="high">Urgent — it is unsafe or blocking people</option>
+                </select>
+              </div>
+              <div className="ledger-field">
+                <label htmlFor="ledger-area">Area</label>
+                <select id="ledger-area" className="ledger-control" value={form.areaId} onChange={(e) => {
+                  update('areaId', e.target.value)
+                  const picked = areas.find((a) => String(a.id) === e.target.value)
+                  if (picked && AREA_COORDS[picked.name] && !location.latitude) {
+                    setLocation({ latitude: AREA_COORDS[picked.name][0], longitude: AREA_COORDS[picked.name][1] })
+                  }
+                }} required>
+                  <option value="">Choose an area…</option>
+                  {areas.map((a) => <option key={a.id} value={a.id}>{a.name} — {a.city}</option>)}
+                </select>
+              </div>
+              <div className="ledger-field">
+                <label htmlFor="ledger-photo">Photo of the problem (optional, JPG/PNG, under 5 MB)</label>
+                <input id="ledger-photo" type="file" className="ledger-control" accept="image/jpeg,image/png" onChange={(e) => onPhotoFile(e.target.files && e.target.files[0])} />
+              </div>
+              {photo.preview && (
+                <img src={photo.preview} alt="Complaint preview" style={{ width: '100%', maxHeight: 240, objectFit: 'cover', borderRadius: 12 }} />
+              )}
+              <div className="ledger-field">
+                <label>Where is it? (optional — click the map)</label>
+                <MapPicker
+                  latitude={location.latitude} longitude={location.longitude}
+                  onChange={(lat, lng) => setLocation({ latitude: lat, longitude: lng })}
+                />
+              </div>
+              <LedgerButton type="submit" busy={submitBusy} busyLabel="Submitting…">
+                Submit complaint
+              </LedgerButton>
+            </form>
+          </LedgerCard>
+          {submittedCode && (
+            <LedgerCard title="Complaint submitted">
+              <LedgerField
+                label="Your tracking code"
+                hint="Save this code — you need it to track your complaint."
+                id="ledger-submitted-code"
+                value={submittedCode}
+                readOnly
+              />
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                <LedgerButton variant="secondary" type="button" onClick={copyCode}>
+                  {copied ? 'Copied' : 'Copy code'}
+                </LedgerButton>
+                <LedgerButton type="button" onClick={() => track(null, submittedCode)}>
+                  Track this complaint
+                </LedgerButton>
+              </div>
+              {submitMsg && <p className="ledger-note" role="status">{submitMsg}</p>}
+            </LedgerCard>
+          )}
+          <Feedback error={submitError} message="" onClearMessage={() => setSubmitMsg('')} />
         </div>
 
         <div className="civic-ledger" id="track-card">
