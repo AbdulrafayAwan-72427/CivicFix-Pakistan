@@ -12,6 +12,8 @@ backend-cpp/civicfix_api
 backend-cpp/test_persistent_undo
 dsa-viva/dsa_viva
 dsa-viva/dsa_viva.exe
+build/
+
 
 # Test / throwaway databases (keep the real one, see below)
 database/api_test.db
