@@ -5,6 +5,19 @@ import ComplaintDetails from '../components/ComplaintDetails.jsx'
 import EmptyState from '../components/EmptyState.jsx'
 import Feedback from '../components/Feedback.jsx'
 import MapPicker from '../components/MapPicker.jsx'
+import { LedgerButton, LedgerCard, LedgerField, LedgerNav } from '../components/ledger/Ledger.jsx'
+
+// Civic Ledger rollout (11 Nov 2026): the Track a complaint section
+// below uses the approved Ledger kit. Everything else on this page
+// keeps the existing styles until the theme is reviewed. The Ledger
+// nav reuses the same citizen items as the sidebar (Submit / Track /
+// My complaints) and calls back to App.jsx's scroll handler.
+const TRACK_NAV = [
+  { id: 'submit', label: 'Submit a report' },
+  { id: 'track', label: 'Track a report' },
+  { id: 'mine', label: 'My complaints' },
+]
+const NAV_TARGET = { submit: 'submit-card', track: 'track-card', mine: 'my-complaints-card' }
 
 // Approximate centres, so picking an area drops the pin nearby —
 // the citizen can still drag/click it to the exact spot.
@@ -19,7 +32,7 @@ const AREA_COORDS = {
 // Citizen view: submit a complaint, track one by code, and see my complaints.
 // The API returns only this citizen's own complaints (see the security
 // fix, 8 Nov 2026); the browser filter below is only for the search box.
-export default function CitizenPage({ currentUser, areas, users = [] }) {
+export default function CitizenPage({ currentUser, areas, users = [], onNavigate }) {
   const [form, setForm] = useState({ title: '', description: '', category: 'Garbage Collection', severity: 'normal', areaId: '' })
   const [submitMsg, setSubmitMsg] = useState('')
   const [submitError, setSubmitError] = useState('')
@@ -48,6 +61,7 @@ export default function CitizenPage({ currentUser, areas, users = [] }) {
   const [code, setCode] = useState('CFX-102')
   const [tracked, setTracked] = useState(null)
   const [trackError, setTrackError] = useState('')
+  const [trackBusy, setTrackBusy] = useState(false)
   const [mine, setMine] = useState([])
   const [mineLoading, setMineLoading] = useState(true)
   const [mineSearchInput, setMineSearchInput] = useState('')
@@ -94,12 +108,19 @@ export default function CitizenPage({ currentUser, areas, users = [] }) {
 
   async function track(event) {
     event.preventDefault()
+    if (trackBusy) return
     setTracked(null)
     setTrackError('')
+    setTrackBusy(true)
     try {
+      // Same call as before: public track-by-code, minimal response
+      // (trackingCode / status / updatedAt). Permissions stay in the
+      // backend; this screen never shows anyone else's complaints.
       setTracked(await get(`/api/complaints/track/${encodeURIComponent(code.trim())}`))
     } catch (err) {
       setTrackError(err.message)
+    } finally {
+      setTrackBusy(false)
     }
   }
 
@@ -192,17 +213,56 @@ export default function CitizenPage({ currentUser, areas, users = [] }) {
           <Feedback error={submitError} message={submitMsg} onClearMessage={() => setSubmitMsg('')} />
         </div>
 
-        <div className="card" id="track-card">
-          <h2>Track a complaint</h2>
-          <p className="small">Enter the code you received when you submitted your report.</p>
-          <form onSubmit={track}>
-            <label>Tracking code
-              <input placeholder="e.g. CFX-102" value={code} onChange={(e) => setCode(e.target.value)} required />
-            </label>
-            <button type="submit">Track</button>
-          </form>
-          <Feedback error={trackError} message="" />
-          {tracked && <div className="mt-12"><ComplaintDetails complaint={tracked} areas={areas} users={users} currentUser={currentUser} /></div>}
+        <div className="civic-ledger" id="track-card">
+          <LedgerNav
+            label="Citizen sections"
+            items={TRACK_NAV}
+            current="track"
+            onSelect={(id) => onNavigate && onNavigate(NAV_TARGET[id], id)}
+          />
+          <div className="ledger-masthead">
+            <img src="/logo.webp" alt="" aria-hidden="true" />
+            <div>
+              <p className="ledger-masthead-title">CivicFix</p>
+              <p className="ledger-masthead-sub">Civic Ledger — track a complaint</p>
+            </div>
+          </div>
+          <LedgerCard title="Track a complaint">
+            <p className="ledger-note">Enter the code you received when you submitted your report.</p>
+            <form onSubmit={track}>
+              <LedgerField
+                label="Tracking code"
+                hint="Codes look like CFX-102."
+                id="ledger-track-code"
+                placeholder="e.g. CFX-102"
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+                error={trackError}
+                required
+              />
+              <LedgerButton type="submit" busy={trackBusy} busyLabel="Looking up complaint…">
+                Track complaint
+              </LedgerButton>
+            </form>
+          </LedgerCard>
+          {tracked && (
+            <LedgerCard title={`Complaint ${tracked.trackingCode}`}>
+              <p className="ledger-note" role="status">
+                Status: <strong>{tracked.status}</strong>
+                {tracked.updatedAt ? ` — last updated ${tracked.updatedAt}.` : '.'}
+              </p>
+              <LedgerButton
+                variant="secondary"
+                type="button"
+                onClick={() => { setTracked(null); document.getElementById('ledger-track-code')?.focus() }}
+              >
+                Track another code
+              </LedgerButton>
+              <div className="mt-12">
+                <ComplaintDetails complaint={tracked} areas={areas} users={users} currentUser={currentUser} />
+              </div>
+            </LedgerCard>
+          )}
         </div>
       </div>
 
