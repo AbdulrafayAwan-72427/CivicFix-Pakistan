@@ -67,6 +67,24 @@ Trade-offs to know for the viva:
   `GET /api/me/assignments` (8 Nov 2026) is Staff only and returns
   the complaints currently assigned to the logged-in staff member,
   in assignment order — the Staff page's "My assignments" view.
+  **Operational lifecycle (11 Nov 2026):** rejecting a complaint
+  requires a reason (`notes` in the status-change body — 400
+  without one), stored on the complaint as `rejectionReason` and
+  shown to the citizen; reopening a closed complaint clears the
+  reason, the duplicate link and the resolution note.
+  `POST /api/complaints/{id}/duplicate` and `POST
+  /api/complaints/{id}/escalate` are Admin only; `GET`/`POST
+  /api/complaints/{id}/notes` follows the same visibility as the
+  complaint itself (Citizen own only, Staff and Admin all), and
+  `GET /api/me/notifications` plus `POST
+  /api/me/notifications/{id}/read` are per-user — one user cannot
+  read or mark another user's notifications (404). Assignments
+  are recorded in the complaint timeline as same-status history
+  events ("Assigned to …" / "Reassigned from … to …") and the
+  assignment reply reports `previousStaffId` and `reassigned`.
+  Every lifecycle change and the notification it creates are
+  written in one transaction, so a failure leaves no half-applied
+  change behind.
   **CORS (8 Nov 2026, allowlist added Nov 2026):** every response
   carries CORS headers and preflight `OPTIONS` requests are
   answered with 204 — so a frontend served from any origin can
@@ -200,11 +218,17 @@ Base URL: `http://localhost:8080`
 | GET | `/api/complaints/{id}` | One complaint (login; Citizen own only) |
 | GET | `/api/complaints/track/{code}` | Track by code, e.g. CFX-102 (public; returns trackingCode, status, updatedAt only) |
 | GET | `/api/complaints/{id}/history` | Permanent status history (login; Citizen own only) |
-| PATCH or PUT | `/api/complaints/{id}/status` | Change status, Admin only (validated transition; includes reopen, see below) |
+| PATCH or PUT | `/api/complaints/{id}/status` | Change status, Admin only (validated transition; includes reopen, see below; rejecting requires a reason in `notes`) |
+| POST | `/api/complaints/{id}/duplicate` | Mark as a duplicate of another report by tracking code, Admin only; closes as Resolved, linked to the original |
+| POST | `/api/complaints/{id}/escalate` | Escalate to priority 5 with a `reason`, Admin only; notifies the assigned staff member |
+| GET | `/api/complaints/{id}/notes` | Progress notes on a complaint (same visibility as the complaint) |
+| POST | `/api/complaints/{id}/notes` | Add a progress note / citizen follow-up `{"body": "..."}` (max 2000 chars; same visibility as the complaint) |
+| GET | `/api/me/notifications` | The logged-in user's in-app notifications, newest first |
+| POST | `/api/me/notifications/{id}/read` | Mark one of your own notifications as read (another user's id → 404) |
 | POST | `/api/users/{id}/disable` | Disable a user and delete all their sessions (Admin only; cannot disable yourself) |
 | POST | `/api/users/{id}/enable` | Re-enable a disabled user (Admin only) |
 | POST | `/api/users/{id}/reset-password` | Set a new password `{"password": "..."}` (min 6 chars) and delete all their sessions (Admin only; no self-service reset) |
-| POST | `/api/assignments` | Assign a Staff user to a complaint, Admin only |
+| POST | `/api/assignments` | Assign a Staff user to a complaint, Admin only; reassigning closes the previous assignment, records it in the timeline, and returns `previousStaffId` + `reassigned` |
 | GET | `/api/admin/actions` | All admin actions, newest first (Admin only) |
 | GET | `/api/admin/actions/latest` | Latest pending (not undone) action (Admin only) |
 | POST | `/api/admin/undo` | Undo the latest pending admin action, Admin only |
@@ -228,6 +252,57 @@ not Submitted). It is recorded in `status_history` and
 `admin_actions` like any other status change, so undo restores the
 closed status. Staff and Citizens cannot reopen (403 — the status
 endpoint is Admin only).
+
+### Rejection reasons (11 Nov 2026)
+
+Rejecting without a reason returns 400. The reason travels in
+`notes` on the status change and is stored on the complaint as
+`rejectionReason` (also in the history row), so the citizen sees
+why their report was rejected. Reopening clears it, along with
+`duplicateOf` and `resolutionNote`.
+
+### Duplicates (11 Nov 2026)
+
+`POST /api/complaints/{id}/duplicate` with
+`{"duplicateOfCode": "CFX-...", "changedByUserId": 2}` closes the
+report as Resolved, sets `duplicateOf` to the original's tracking
+code and `resolutionNote` to "Duplicate of CFX-…". Rules: the
+original must exist (404), a report cannot duplicate itself (400),
+the original cannot itself be a duplicate (no chains, 400), and
+an already-closed report cannot be marked a duplicate (400). The
+citizen is notified. The duplicate no longer counts as pending
+(it is Resolved) and is excluded from the work queue.
+
+### Escalation (11 Nov 2026)
+
+`POST /api/complaints/{id}/escalate` with `{"reason": "...",
+"changedByUserId": 2}` sets `priorityScore` to 5 and `escalated`
+to true, records an "Escalated: …" timeline event, and notifies
+the assigned staff member (if any). An already-escalated or
+closed complaint returns 400; a missing reason returns 400.
+
+### Progress notes (11 Nov 2026)
+
+`GET` / `POST /api/complaints/{id}/notes` is the progress thread:
+staff post field updates, citizens post follow-ups, admins post
+either. Visibility follows the complaint (Citizen own only). A
+note is at most 2000 characters. Posting a note notifies whoever
+needs to act on it: a citizen's follow-up notifies the assigned
+staff member (or all Admins when nobody is assigned yet); a
+staff/admin update notifies the citizen.
+
+### Notifications (11 Nov 2026)
+
+Notifications are **in-app only**. No email or SMS provider is
+configured, so nothing is faked as sent outside the app. A
+notification is created for: a status change (to the citizen), an
+assignment or reassignment (to the new staff member and the
+citizen), a duplicate marking (to the citizen), an escalation (to
+the assigned staff member), and a new note (routed as above). Each
+one is written in the same transaction as the event that caused
+it. `GET /api/me/notifications` lists the logged-in user's own
+notifications, newest first (latest 50); `POST
+/api/me/notifications/{id}/read` marks one read.
 
 An invalid transition returns `400` and changes nothing. Persistent
 undo bypasses this on purpose: undo restores the previous status even
@@ -282,6 +357,18 @@ in-memory stack code still compiles unchanged.
 All of these were verified with curl against a copy of the uploaded
 database; the delivered `database/civicfix.db` was not used for the
 API test:
+
+**Phase 3 (11 Nov 2026, `workspace/civicfix/
+handoff2_phase3_test.sh`):** 59/59 pass on a seed-DB copy —
+end-to-end trace (submit → triage → assign → progress notes →
+resolve), rejection requires a reason and reopening clears it,
+duplicate marking with all four failure rules, reassignment with
+previous-staff reporting and queue updates, escalation to P5 with
+notifications, notes role boundaries, notification inbox
+read/ownership rules, and history unchanged after failed
+transitions. The 47-check security matrix (`sec_test.sh`) and the
+phase 2 suite (31/31) were re-run against the same build and still
+pass; the original database is unchanged (md5 verified).
 
 - Health, areas, complaints list, and tracking CFX-102: correct JSON
 - New Staff user created (id 3), new complaint created as CFX-104

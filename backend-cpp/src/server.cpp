@@ -196,6 +196,10 @@ static std::string complaintJson(const Complaint& c) {
         ",\"aiConfidence\":" + std::to_string(c.aiConfidence) +
         ",\"aiImageLabel\":" + jsonStr(c.aiImageLabel) +
         ",\"status\":" + jsonStr(toString(c.status)) +
+        ",\"rejectionReason\":" + jsonStr(c.rejectionReason) +
+        ",\"duplicateOf\":" + jsonStr(c.duplicateOf) +
+        ",\"resolutionNote\":" + jsonStr(c.resolutionNote) +
+        ",\"escalated\":" + (c.escalated ? "true" : "false") +
         ",\"createdAt\":" + jsonStr(c.createdAt) +
         ",\"updatedAt\":" + jsonStr(c.updatedAt) + "}";
 }
@@ -213,6 +217,30 @@ static std::string publicTrackingJson(const Complaint& c) {
         "\"trackingCode\":" + jsonStr(c.trackingCode) +
         ",\"status\":" + jsonStr(toString(c.status)) +
         ",\"updatedAt\":" + jsonStr(c.updatedAt) + "}";
+}
+
+// Phase 3 (11 Nov 2026, handoff-2): progress-note and
+// notification serializers. A note shows who wrote it (id +
+// role); the frontend resolves names from GET /api/users.
+static std::string noteJson(const ComplaintNote& n) {
+    return "{"
+        "\"id\":" + std::to_string(n.id) +
+        ",\"complaintId\":" + std::to_string(n.complaintId) +
+        ",\"authorId\":" + std::to_string(n.authorId) +
+        ",\"authorRole\":" + jsonStr(n.authorRole) +
+        ",\"body\":" + jsonStr(n.body) +
+        ",\"createdAt\":" + jsonStr(n.createdAt) + "}";
+}
+
+static std::string notificationJson(const Notification& n) {
+    return "{"
+        "\"id\":" + std::to_string(n.id) +
+        ",\"userId\":" + std::to_string(n.userId) +
+        ",\"complaintId\":" + std::to_string(n.complaintId) +
+        ",\"kind\":" + jsonStr(n.kind) +
+        ",\"message\":" + jsonStr(n.message) +
+        ",\"isRead\":" + (n.isRead ? "true" : "false") +
+        ",\"createdAt\":" + jsonStr(n.createdAt) + "}";
 }
 
 static std::string userJson(const User& u) {
@@ -1173,6 +1201,12 @@ static Response handleRequest(Database& db, const std::string& method,
             jsonGetString(body, "notes", notes);
             ComplaintStatus newStatus;
             if (!parseStatus(statusStr, newStatus)) return bad("Invalid newStatus");
+            // Phase 3 (11 Nov 2026, handoff-2): a rejection is only
+            // meaningful with its reason - the citizen sees it, and
+            // the timeline records it. The reason travels in `notes`
+            // and is stored on the complaint by updateComplaintStatus.
+            if (newStatus == ComplaintStatus::Rejected && notes.empty())
+                return bad("A reason is required when rejecting a complaint (send it in notes)");
             Complaint current;
             if (!db.getComplaintById(id, current)) return {404, errorJson("Complaint not found")};
             if (!userExists(db, changedBy)) return bad("changedByUserId does not exist");
@@ -1184,6 +1218,91 @@ static Response handleRequest(Database& db, const std::string& method,
             Complaint updated;
             db.getComplaintById(id, updated);
             return {200, complaintJson(updated)};
+        }
+        // POST /api/complaints/{id}/duplicate - Admin only. Closes
+        // the report as a duplicate of another one (Phase 3, 11 Nov
+        // 2026, handoff-2): the duplicate is Resolved, linked to
+        // the original by tracking code, and the citizen is told.
+        if (method == "POST" && p.size() == 4 && p[3] == "duplicate") {
+            Response denied;
+            if (!requireRole(db, actorId, UserRole::Admin, "mark complaints as duplicates", denied))
+                return denied;
+            std::string duplicateOfCode, notes;
+            int changedBy = 0;
+            if (!jsonGetString(body, "duplicateOfCode", duplicateOfCode) || duplicateOfCode.empty())
+                return bad("duplicateOfCode is required");
+            if (!jsonGetInt(body, "changedByUserId", changedBy)) return bad("changedByUserId is required");
+            if (changedBy != actorId)
+                return {403, errorJson("changedByUserId must match the acting user")};
+            jsonGetString(body, "notes", notes);
+            Complaint current;
+            if (!db.getComplaintById(id, current)) return {404, errorJson("Complaint not found")};
+            Complaint target;
+            if (!db.getComplaintByTrackingCode(duplicateOfCode, target))
+                return {404, errorJson("Original complaint not found")};
+            if (target.id == id) return bad("A complaint cannot duplicate itself");
+            if (!db.markComplaintDuplicate(id, duplicateOfCode, changedBy, notes))
+                return {400, errorJson("Could not mark as duplicate: the report may already be closed, or the original is itself a duplicate")};
+            Complaint updated;
+            db.getComplaintById(id, updated);
+            return {200, complaintJson(updated)};
+        }
+        // POST /api/complaints/{id}/escalate - Admin only. Raises
+        // the case to priority 5 and flags it escalated (Phase 3):
+        // the assigned staff member is notified, and the timeline
+        // records the reason.
+        if (method == "POST" && p.size() == 4 && p[3] == "escalate") {
+            Response denied;
+            if (!requireRole(db, actorId, UserRole::Admin, "escalate complaints", denied))
+                return denied;
+            std::string reason;
+            int changedBy = 0;
+            if (!jsonGetString(body, "reason", reason) || reason.empty())
+                return bad("reason is required");
+            if (!jsonGetInt(body, "changedByUserId", changedBy)) return bad("changedByUserId is required");
+            if (changedBy != actorId)
+                return {403, errorJson("changedByUserId must match the acting user")};
+            Complaint current;
+            if (!db.getComplaintById(id, current)) return {404, errorJson("Complaint not found")};
+            if (!db.escalateComplaint(id, changedBy, reason))
+                return {400, errorJson("Could not escalate: the complaint may already be escalated or closed")};
+            Complaint updated;
+            db.getComplaintById(id, updated);
+            return {200, complaintJson(updated)};
+        }
+        // GET / POST /api/complaints/{id}/notes - the progress
+        // thread (Phase 3): staff post field updates, citizens post
+        // follow-ups, admins post either. Anyone who can see the
+        // complaint can read and write its notes.
+        if (method == "GET" && p.size() == 4 && p[3] == "notes") {
+            User actor;
+            Response denied;
+            if (!loadActor(db, actorId, actor, denied)) return denied;
+            Complaint c;
+            if (!db.getComplaintById(id, c)) return {404, errorJson("Complaint not found")};
+            if (!canSeeComplaint(actor, c))
+                return {403, errorJson("A citizen can only view notes on their own complaints")};
+            return {200, listJson<ComplaintNote>(db.getComplaintNotes(id), noteJson)};
+        }
+        if (method == "POST" && p.size() == 4 && p[3] == "notes") {
+            User actor;
+            Response denied;
+            if (!loadActor(db, actorId, actor, denied)) return denied;
+            Complaint c;
+            if (!db.getComplaintById(id, c)) return {404, errorJson("Complaint not found")};
+            if (!canSeeComplaint(actor, c))
+                return {403, errorJson("A citizen can only add notes to their own complaints")};
+            std::string noteBody;
+            if (!jsonGetString(body, "body", noteBody) || noteBody.empty())
+                return bad("body is required");
+            if (noteBody.size() > 2000) return bad("Note is too long (max 2000 characters)");
+            int noteId = 0;
+            if (!db.addComplaintNote(id, actorId, toString(actor.role), noteBody, noteId))
+                return {500, errorJson("Could not save note")};
+            std::vector<ComplaintNote> notes = db.getComplaintNotes(id);
+            for (const ComplaintNote& n : notes)
+                if (n.id == noteId) return {201, noteJson(n)};
+            return {201, "{\"id\":" + std::to_string(noteId) + "}"};
         }
     }
 
@@ -1204,11 +1323,16 @@ static Response handleRequest(Database& db, const std::string& method,
         if (!userExists(db, staffId, &staff)) return bad("staffId does not exist");
         if (staff.role != UserRole::Staff) return bad("staffId is not a Staff user");
         if (!userExists(db, assignedBy)) return bad("assignedByAdminId does not exist");
-        if (!db.assignComplaint(complaintId, staffId, assignedBy))
+        int previousStaffId = 0;
+        if (db.getCurrentAssignee(complaintId, previousStaffId) && previousStaffId == staffId)
+            return bad("Complaint is already assigned to this staff member");
+        if (!db.assignComplaint(complaintId, staffId, assignedBy, previousStaffId))
             return {500, errorJson("Could not assign complaint")};
         return {201, "{\"complaintId\":" + std::to_string(complaintId) +
                       ",\"staffId\":" + std::to_string(staffId) +
-                      ",\"assignedByAdminId\":" + std::to_string(assignedBy) + "}"};
+                      ",\"assignedByAdminId\":" + std::to_string(assignedBy) +
+                      ",\"previousStaffId\":" + std::to_string(previousStaffId) +
+                      ",\"reassigned\":" + (previousStaffId != 0 ? "true" : "false") + "}"};
     }
 
     // GET /api/admin/actions, GET /api/admin/actions/latest, POST /api/admin/undo
@@ -1297,6 +1421,31 @@ static Response handleRequest(Database& db, const std::string& method,
         if (!requireRole(db, actorId, UserRole::Staff, "view their own assignments", denied))
             return denied;
         return {200, listJson<Complaint>(db.getComplaintsAssignedTo(actorId), complaintJson)};
+    }
+
+    // GET /api/me/notifications - the logged-in user's own
+    // in-app inbox, newest first (Phase 3, 11 Nov 2026,
+    // handoff-2). Delivery channel decision: in-app only for now
+    // - no email/SMS provider is configured, so nothing is faked
+    // as sent. Notifications are written in the same transaction
+    // as the event that caused them, so they cannot be lost or
+    // orphaned; marking read is per-user.
+    if (method == "GET" && p.size() == 3 && p[0] == "api" && p[1] == "me" && p[2] == "notifications") {
+        User actor;
+        Response denied;
+        if (!loadActor(db, actorId, actor, denied)) return denied;
+        return {200, listJson<Notification>(db.getNotificationsForUser(actorId), notificationJson)};
+    }
+    // POST /api/me/notifications/{id}/read - mark one of your own
+    // notifications as read. Another user's id returns 404, so
+    // notification ids cannot be used to probe other inboxes.
+    if (method == "POST" && p.size() == 5 && p[0] == "api" && p[1] == "me" && p[2] == "notifications" && isNumber(p[3]) && p[4] == "read") {
+        User actor;
+        Response denied;
+        if (!loadActor(db, actorId, actor, denied)) return denied;
+        if (!db.markNotificationRead(std::stoi(p[3]), actorId))
+            return {404, errorJson("Notification not found")};
+        return {200, "{\"read\":true}"};
     }
 
     // GET /api/queue — active complaints in FIFO order, via the custom queue.

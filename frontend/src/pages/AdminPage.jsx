@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { CATEGORIES, NEXT_STATUSES, STATUSES, get, patch, post } from '../api.js'
+import { CATEGORIES, NEXT_STATUSES, STATUSES, get, patch, post, markDuplicate, escalateComplaint } from '../api.js'
 import { CATEGORY_COLORS, areaShort, exportCsv, hasCoords, matchesSearch, resolutionRate, sortComplaints, statusClass } from '../utils.js'
 import ComplaintDetails from '../components/ComplaintDetails.jsx'
 import EmptyState from '../components/EmptyState.jsx'
@@ -36,6 +36,8 @@ export default function AdminPage({ currentUser, users, areas = [], onUsersChang
   const [selectedStatus, setSelectedStatus] = useState('')
   const [selectedNotes, setSelectedNotes] = useState('')
   const [selectedStaff, setSelectedStaff] = useState('')
+  const [duplicateCode, setDuplicateCode] = useState('')
+  const [escalateReason, setEscalateReason] = useState('')
   const [panelError, setPanelError] = useState('')
   const [panelMessage, setPanelMessage] = useState('')
   const [panelBusy, setPanelBusy] = useState(false)
@@ -54,6 +56,8 @@ export default function AdminPage({ currentUser, users, areas = [], onUsersChang
     setSelectedStatus('')
     setSelectedNotes('')
     setSelectedStaff('')
+    setDuplicateCode('')
+    setEscalateReason('')
     setPanelError('')
     setPanelMessage('')
     setConfirming(null)
@@ -91,6 +95,10 @@ export default function AdminPage({ currentUser, users, areas = [], onUsersChang
   async function changeStatus() {
     if (panelBusy || !selected) return
     if (!selectedStatus) { setPanelError('Choose a new status first.'); return }
+    // Phase 3 (11 Nov 2026, handoff-2): the API requires a reason
+    // to reject — the citizen sees it on their complaint — so ask
+    // for it here instead of letting the API refuse the change.
+    if (selectedStatus === 'Rejected' && !selectedNotes.trim()) { setPanelError('A reason is required to reject a complaint — the citizen will see it.'); return }
     // Rejecting ends the workflow for the citizen, so it asks first.
     if (selectedStatus === 'Rejected' && confirming !== 'reject') { setConfirming('reject'); return }
     setConfirming(null)
@@ -115,10 +123,47 @@ export default function AdminPage({ currentUser, users, areas = [], onUsersChang
     setPanelError(''); setPanelMessage('')
     setPanelBusy(true)
     try {
-      await post('/api/assignments', { complaintId: selected.id, staffId: sid, assignedByAdminId: currentUser.id })
+      const result = await post('/api/assignments', { complaintId: selected.id, staffId: sid, assignedByAdminId: currentUser.id })
       const name = staffUsers.find((u) => u.id === sid)?.fullName || `staff user ${sid}`
-      setPanelMessage(`${selected.trackingCode} assigned to ${name}. Its status is still ${selected.status} — update it when work begins.`)
+      setPanelMessage(result.reassigned
+        ? `${selected.trackingCode} reassigned to ${name}. Its status is still ${selected.status} — update it when work begins.`
+        : `${selected.trackingCode} assigned to ${name}. Its status is still ${selected.status} — update it when work begins.`)
+      const fresh = await get(`/api/complaints/${selected.id}`)
+      setSelected(fresh)
       loadComplaints()
+    } catch (err) { setPanelError(err.message) } finally { setPanelBusy(false) }
+  }
+
+  // Phase 3 (11 Nov 2026, handoff-2): duplicates and escalation.
+  // Both close or flag the case and notify the people involved;
+  // the API validates the rules (no chains, no self-duplicate,
+  // no re-escalation) and returns the updated complaint.
+  async function markDup() {
+    if (panelBusy || !selected) return
+    const code = duplicateCode.trim().toUpperCase()
+    if (!code) { setPanelError('Enter the tracking code of the original report.'); return }
+    setPanelError(''); setPanelMessage('')
+    setPanelBusy(true)
+    try {
+      const fresh = await markDuplicate(selected.id, code, currentUser.id, '')
+      setSelected(fresh)
+      setDuplicateCode('')
+      setPanelMessage(`${selected.trackingCode} marked as a duplicate of ${code} and closed.`)
+      loadComplaints(); loadAll()
+    } catch (err) { setPanelError(err.message) } finally { setPanelBusy(false) }
+  }
+
+  async function escalate() {
+    if (panelBusy || !selected) return
+    if (!escalateReason.trim()) { setPanelError('Give a reason for the escalation.'); return }
+    setPanelError(''); setPanelMessage('')
+    setPanelBusy(true)
+    try {
+      const fresh = await escalateComplaint(selected.id, escalateReason.trim(), currentUser.id)
+      setSelected(fresh)
+      setEscalateReason('')
+      setPanelMessage(`${selected.trackingCode} escalated to priority 5.`)
+      loadComplaints(); loadAll()
     } catch (err) { setPanelError(err.message) } finally { setPanelBusy(false) }
   }
 
@@ -523,7 +568,7 @@ export default function AdminPage({ currentUser, users, areas = [], onUsersChang
               <button className="secondary small" onClick={() => setSelected(null)} aria-label="Close complaint detail"><span aria-hidden="true">✕</span> Close</button>
             </div>
             <div className="mt-12">
-              <ComplaintDetails complaint={selected} areas={areas} users={users} />
+              <ComplaintDetails complaint={selected} areas={areas} users={users} currentUser={currentUser} />
             </div>
             <h3 className="mt-16">Manage this complaint</h3>
             <p className="small">Change the status or assign this complaint to a staff member.</p>
@@ -534,13 +579,13 @@ export default function AdminPage({ currentUser, users, areas = [], onUsersChang
                   {(NEXT_STATUSES[selected.status] || []).map((s) => <option key={s}>{s}</option>)}
                 </select>
               </label>
-              <label>Notes (optional)
-                <input placeholder="Notes (optional)" value={selectedNotes} onChange={(e) => setSelectedNotes(e.target.value)} />
+              <label>Notes (required when rejecting)
+                <input placeholder="Reason for rejection — the citizen will see it" value={selectedNotes} onChange={(e) => setSelectedNotes(e.target.value)} />
               </label>
               <button onClick={changeStatus} disabled={panelBusy}>{panelBusy ? 'Updating…' : 'Change status'}</button>
             </div>
             {confirming === 'reject' && (
-              <p className="error">Reject {selected.trackingCode}? The citizen will see it as rejected.
+              <p className="error">Reject {selected.trackingCode}? The citizen will see it as rejected, with this reason: “{selectedNotes.trim()}”.
                 <span className="row-actions">
                   <button className="secondary small" onClick={changeStatus} disabled={panelBusy}>Reject it</button>
                   <button className="secondary small" onClick={() => setConfirming(null)}>Cancel</button>
@@ -557,6 +602,28 @@ export default function AdminPage({ currentUser, users, areas = [], onUsersChang
               <button className="secondary" onClick={assign} disabled={panelBusy || staffUsers.length === 0}>{panelBusy ? 'Assigning…' : 'Assign staff'}</button>
             </div>
             {staffUsers.length === 0 && <p className="small">Add a staff member in Team first.</p>}
+            {selected.status !== 'Resolved' && selected.status !== 'Rejected' && (
+              <>
+                <h3 className="mt-16">Duplicate &amp; escalation</h3>
+                <div className="toolbar">
+                  <label>Mark as duplicate of
+                    <input placeholder="e.g. CFX-7K3M9P" value={duplicateCode} onChange={(e) => setDuplicateCode(e.target.value)} />
+                  </label>
+                  <button className="secondary" onClick={markDup} disabled={panelBusy}>{panelBusy ? 'Updating…' : 'Mark duplicate'}</button>
+                </div>
+                <p className="small">Closes this report as a duplicate of the original. The citizen is told which report theirs duplicates.</p>
+                {!selected.escalated ? (
+                  <div className="toolbar">
+                    <label>Escalate — reason
+                      <input placeholder="Why is this urgent now?" value={escalateReason} onChange={(e) => setEscalateReason(e.target.value)} />
+                    </label>
+                    <button className="secondary" onClick={escalate} disabled={panelBusy}>{panelBusy ? 'Updating…' : 'Escalate to P5'}</button>
+                  </div>
+                ) : (
+                  <p className="small">This complaint is already escalated (priority 5).</p>
+                )}
+              </>
+            )}
             <Feedback error={panelError} message={panelMessage} onClearMessage={() => setPanelMessage('')} />
           </div>
         </>

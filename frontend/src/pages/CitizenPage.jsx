@@ -202,7 +202,7 @@ export default function CitizenPage({ currentUser, areas, users = [] }) {
             <button type="submit">Track</button>
           </form>
           <Feedback error={trackError} message="" />
-          {tracked && <div className="mt-12"><ComplaintDetails complaint={tracked} areas={areas} users={users} /></div>}
+          {tracked && <div className="mt-12"><ComplaintDetails complaint={tracked} areas={areas} users={users} currentUser={currentUser} /></div>}
         </div>
       </div>
 
@@ -222,7 +222,7 @@ export default function CitizenPage({ currentUser, areas, users = [] }) {
             hint={mine.length === 0 ? 'Submit one above.' : 'Try a different search.'}
           />
         ) : (
-          filteredMine.map((c) => <ComplaintDetails key={c.id} complaint={c} areas={areas} users={users} />)
+          filteredMine.map((c) => <ComplaintDetails key={c.id} complaint={c} areas={areas} users={users} currentUser={currentUser} />)
         )}
       </div>
     </>

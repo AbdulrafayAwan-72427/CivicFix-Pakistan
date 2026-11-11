@@ -11,7 +11,7 @@ import Feedback from '../components/Feedback.jsx'
 // cards repeating the same complaint.
 const PAGE_SIZE = 10
 
-export default function StaffPage({ areas = [], users = [] }) {
+export default function StaffPage({ currentUser = null, areas = [], users = [] }) {
   const [queue, setQueue] = useState([])
   const [active, setActive] = useState([])
   const [myAssignments, setMyAssignments] = useState(undefined) // undefined = loading, null = endpoint unavailable
@@ -163,7 +163,7 @@ export default function StaffPage({ areas = [], users = [] }) {
               <h3 className="mt-0">Complaint detail — {selected.trackingCode}</h3>
               <button className="secondary small" onClick={() => setSelected(null)} aria-label="Close complaint detail"><span aria-hidden="true">✕</span> Close</button>
             </div>
-            <ComplaintDetails complaint={selected} areas={areas} users={users} />
+            <ComplaintDetails complaint={selected} areas={areas} users={users} currentUser={currentUser} />
           </div>
         )}
       </div>

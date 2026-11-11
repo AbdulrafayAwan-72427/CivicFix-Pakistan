@@ -31,6 +31,10 @@ matrix `workspace/civicfix/sec_test.sh`.
 | Work queue `GET /api/queue` | no | no | yes | yes |
 | My assignments `GET /api/me/assignments` | no | no | own only | no (403) |
 | Change status (incl. reopen) | no | no | no | yes |
+| Reject (reason required, citizen sees it) | no | no | no | yes |
+| Mark duplicate / escalate | no | no | no | yes |
+| Progress notes (read + write) | no | own only | all | all |
+| Notifications inbox (own only) | no | yes | yes | yes |
 | Assign `POST /api/assignments` | no | no | no | yes |
 | Stats `GET /api/stats` | no | no | no | yes |
 | Audit trail `GET /api/admin/actions`, undo | no | no | no | yes |
@@ -70,8 +74,13 @@ signed-URL or cookie change, not a one-line fix.
   and to `admin_actions`, so the timeline and undo both see it.
 - **Audit entries:** status changes are audited. Assignments are
   **not** recorded in `admin_actions` (writing one there would
-  pollute the undo stack, which restores a previous status). The
-  Admin Actions panel says so. A unified audit log is still open.
+  pollute the undo stack, which restores a previous status) — but
+  since phase 3 (11 Nov 2026) they **are** recorded in the complaint
+  timeline as same-status `status_history` events ("Assigned to …" /
+  "Reassigned from … to …"), so the incident timeline explains who
+  had a case and when it changed hands. The Admin Actions panel
+  says assignments are not recorded there. A unified audit log is
+  still open.
 - **Sessions:** tokens are random strings in the `sessions` table,
   24-hour expiry, checked on every request (`expires_at >
   datetime('now')`). Logout deletes the token. Disabling a user
@@ -115,6 +124,62 @@ signed-URL or cookie change, not a one-line fix.
   request bodies. Do not add request logging that captures
   `Authorization` headers.
 
+## Decisions made in phase 3 (11 Nov 2026)
+
+- **Rejection reasons:** rejecting without a reason is refused
+  (400). The reason is stored on the complaint and shown to the
+  citizen, and reopening a closed complaint clears it (along with
+  the duplicate link and resolution note), so the case comes back
+  to triage clean.
+- **Duplicates:** Admin only. Marking a report as a duplicate of
+  another closes it as Resolved and links it to the original by
+  tracking code. No chains (the original cannot itself be a
+  duplicate), no self-duplicates, and no marking an already-closed
+  report. The citizen is notified which report theirs duplicates.
+  A duplicate is Resolved, so it leaves the pending count and the
+  work queue on its own — no special-casing in stats.
+- **Reassignment:** Admin only, through the same assignment
+  endpoint. Reassigning closes the previous assignment row
+  (`unassigned_at`) so "currently assigned" stays exactly one
+  staff member, records a timeline event naming both sides, and
+  notifies the new assignee and the citizen. The reply reports
+  `previousStaffId` and `reassigned`. Assigning the same staff
+  member again is refused (400).
+- **Escalation:** Admin only. Escalating sets priority 5 and an
+  `escalated` flag, records the reason in the timeline, and
+  notifies the assigned staff member. Staff cannot escalate
+  directly — they flag urgency in a progress note and an Admin
+  escalates. A case can only be escalated once, and closed cases
+  cannot be escalated.
+- **Progress notes:** anyone who can see a complaint can read and
+  write its notes (Citizen own only, Staff and Admin all).
+  Staff post field updates, citizens post follow-ups. A citizen's
+  follow-up notifies the assigned staff member — or all Admins
+  when nobody is assigned yet. A staff/admin update notifies the
+  citizen. Notes are capped at 2000 characters.
+- **Notifications:** **in-app only, by decision.** No email or SMS
+  provider is configured for this product, so notifications are
+  delivered to the in-app inbox (bell in the top bar, unread
+  count, mark-read per item) and nothing is faked as sent
+  elsewhere. They are written in the same database transaction as
+  the event that caused them, so they cannot be lost or orphaned,
+  and there is no external delivery to retry. Adding email/SMS
+  needs an operator decision on a provider plus its credentials,
+  and is still open.
+- **State-change consistency:** every lifecycle change (status,
+  duplicate, escalation, assignment, note) writes its complaint
+  change, its audit row(s) and its notification(s) in one
+  transaction. A failed call changes nothing — verified by the
+  phase 3 tests, which check history counts after failed
+  transitions and duplicates.
+- **Language:** the pilot UI stays in English. The ML service
+  already understands Roman Urdu in complaint text, and the
+  submit form accepts it. A Urdu-script / RTL interface needs a
+  decision with the pilot users first and is still open.
+- **Location fallback:** the map pin is optional. If map tiles
+  cannot load (slow connection), the page says so and the report
+  can still be submitted with the area alone.
+
 ## Pilot gate (phase 2)
 
 The pilot may start when all of these are true:
@@ -139,3 +204,13 @@ Still open after phase 2: unified audit log (assignments included);
 Staff visibility restriction for multi-team scale; self-service
 password recovery; registration/complaint rate limiting; true
 deletion / anonymisation; photo delivery behind login.
+
+## Pilot gate (phase 3, 11 Nov 2026)
+
+In addition to the phase 2 gate: a citizen, a staff member and an
+admin can each complete their workflow with the expected access,
+and the incident timeline explains who changed what and when —
+verified by `handoff2_phase3_test.sh` (59/59: end-to-end trace,
+rejection reasons, duplicates, reassignment, escalation, notes,
+notifications, failure consistency), with `sec_test.sh` 47/47 and
+the phase 2 suite 31/31 re-run on the same build.

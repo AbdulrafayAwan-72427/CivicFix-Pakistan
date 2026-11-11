@@ -4,6 +4,7 @@ import LoginPage from './pages/LoginPage.jsx'
 import CitizenPage from './pages/CitizenPage.jsx'
 import AdminPage from './pages/AdminPage.jsx'
 import StaffPage from './pages/StaffPage.jsx'
+import NotificationsBell from './components/NotificationsBell.jsx'
 
 // Role-based sidebar (RBAC): the sidebar no longer lists Citizen,
 // Admin and Staff together. The page and the sidebar are driven by
@@ -227,6 +228,7 @@ export default function App() {
           <div className="topbar-actions">
             {apiOk === true && <span className="pill"><span className="dot" /> API connected</span>}
             {apiOk === false && <span className="pill bad"><span className="dot" /> API not reachable</span>}
+            <NotificationsBell />
             <span className="small topbar-user">
               Logged in as <strong>{currentUser.fullName}</strong> ({currentUser.role})
             </span>
@@ -247,7 +249,7 @@ export default function App() {
 
           {tab === 'citizen' && <CitizenPage currentUser={currentUser} areas={areas} users={users} />}
           {tab === 'admin' && <AdminPage currentUser={currentUser} users={users} areas={areas} onUsersChanged={reloadUsers} section={adminSection} onSectionChange={setAdminSection} />}
-          {tab === 'staff' && <StaffPage areas={areas} users={users} />}
+          {tab === 'staff' && <StaffPage currentUser={currentUser} areas={areas} users={users} />}
         </main>
       </div>
     </div>

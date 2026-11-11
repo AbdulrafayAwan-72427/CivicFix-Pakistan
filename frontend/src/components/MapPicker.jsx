@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { hasCoords } from '../utils.js'
@@ -25,6 +25,11 @@ export default function MapPicker({ latitude, longitude, onChange, readOnly = fa
   const mapRef = useRef(null)
   const markerRef = useRef(null)
   const layerRef = useRef(null)
+  // Location fallback (Phase 3, 11 Nov 2026, handoff-2): on a slow
+  // connection the map tiles may never arrive. The report must still
+  // be submittable with the area alone, so a tile failure shows this
+  // note instead of leaving a blank grey box unexplained.
+  const [tileFailed, setTileFailed] = useState(false)
 
   useEffect(() => {
     if (!divRef.current || mapRef.current) return
@@ -34,7 +39,7 @@ export default function MapPicker({ latitude, longitude, onChange, readOnly = fa
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-    }).addTo(map)
+    }).on('tileerror', () => setTileFailed(true)).addTo(map)
     mapRef.current = map
     if (!readOnly) {
       map.on('click', (e) => { if (onChange) onChange(e.latlng.lat, e.latlng.lng) })
@@ -103,6 +108,9 @@ export default function MapPicker({ latitude, longitude, onChange, readOnly = fa
   return (
     <div>
       <div ref={divRef} style={{ height: `clamp(200px, 40vh, ${height}px)`, width: '100%', borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)' }} />
+      {tileFailed && (
+        <p className="small" role="status">Map tiles could not load — your connection may be slow. You can still submit with your area only; the pin is optional.</p>
+      )}
       {!readOnly && (
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8, flexWrap: 'wrap' }}>
           <button type="button" className="secondary small" onClick={useMyLocation}><span aria-hidden="true">📍</span> Use my location</button>

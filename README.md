@@ -15,11 +15,16 @@ dashboard.
    description and the photo, so the report lands with the right team.
    A human always makes the final call.
 3. **An admin assigns it** to a staff member and updates its status
-   as work progresses.
+   as work progresses. Staff post progress updates on the case, and
+   the citizen can add follow-ups — both sides see the same thread.
+   If the same problem is reported twice, an admin marks the second
+   report as a duplicate of the first instead of working it twice.
 4. **The citizen tracks it** with a tracking code (like `CFX-102`),
    watching it move: Submitted → Under Review → Assigned →
    In Progress → Resolved. Every change is recorded in a permanent
-   audit trail, and a wrong status change can be undone.
+   audit trail, and a wrong status change can be undone. When
+   something changes on their report — a new status, an assignment,
+   a staff update — the citizen finds it in their notifications.
 
 ## Features
 
@@ -27,10 +32,14 @@ dashboard.
 - Submit a report with a photo and a map location
 - Track any report by its code, with a step-by-step progress view
 - See all your own reports, plus the full history of each one
+- Add follow-up notes on your own reports, and get notified when
+  the status changes, your report is assigned, or staff post an update
 
 **For staff**
 - A work queue in first-come-first-served order
 - All active complaints with their photo, location, and history
+- Post progress updates on the cases you work on, and get notified
+  when a citizen follows up or a case is escalated to you
 
 **For admins**
 - Operations dashboard: totals, resolution rate, charts by status,
@@ -38,6 +47,11 @@ dashboard.
 - Search, filter, and sort complaints; export them as CSV
 - A live map with a pin for every located complaint
 - Assign complaints to staff, change statuses, and undo mistakes
+- Reassign a case to another staff member — the timeline records
+  who had it before
+- Reject with a reason the citizen can see; reopen closed cases
+- Mark duplicate reports and close them against the original;
+  escalate urgent cases to priority 5
 - Manage the team: add staff members who can then log in
 - A full audit feed of every action taken
 
@@ -136,7 +150,12 @@ See `documentation/API.md` for the full endpoint list. Highlights:
 - `POST /api/complaints` (tracking code auto-generated, photo and
   map pin included), track by `GET /api/complaints/track/CFX-102`
 - `PATCH /api/complaints/{id}/status` with validated transitions
-  (Submitted → Under Review → Assigned → In Progress → Resolved)
+  (Submitted → Under Review → Assigned → In Progress → Resolved);
+  rejecting needs a reason, and closed cases can be reopened
+- `POST /api/complaints/{id}/duplicate` (Admin) and
+  `/api/complaints/{id}/escalate` (Admin), `GET`/`POST`
+  `/api/complaints/{id}/notes` (progress thread), `GET`
+  `/api/me/notifications` (in-app inbox)
 - `POST /api/assignments`, `GET /api/queue`,
   `POST /api/admin/undo` — the last admin action can be undone
 
@@ -231,6 +250,26 @@ Demo-password seeding can be switched off with
 checked against their real file type, not just the extension.
 Backup and restore are documented in
 `documentation/BACKUP.md` and were tested with a real photo.
+
+**Operational lifecycle (11 Nov 2026):** the complaint lifecycle
+is finished end to end. Rejecting a report now requires a reason,
+which the citizen sees on their complaint; reopening a closed case
+clears it. An admin can mark a report as a duplicate of another
+(no chains, no self-duplicates) and the duplicate closes as
+Resolved, linked to the original. Reassignment is recorded in the
+timeline — who had the case before, and who has it now — and the
+new assignee is notified. Escalation raises a case to priority 5
+with a reason, and notifies the assigned staff member. Staff post
+progress updates and citizens post follow-ups in a notes thread on
+each complaint, and everyone gets in-app notifications for
+assignments, status changes, notes and escalations (there is no
+email or SMS provider configured, so nothing is sent outside the
+app). Every one of these changes, including the notification that
+goes with it, is written in a single database transaction, so a
+failure leaves no half-applied change behind. The map also degrades
+gracefully now: if its tiles cannot load on a slow connection, the
+page says so and the report can still be submitted with the area
+alone.
 
 Still to do before public use: change the demo passwords, and
 a hosted deployment — see `documentation/DEPLOYMENT.md`. The photo

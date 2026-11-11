@@ -6,6 +6,13 @@
 
 namespace civicfix {
 
+// Phase 3 (11 Nov 2026, handoff-2) helpers, defined with the
+// lifecycle methods near the end of this file; declared here so
+// assignComplaint (earlier in the file) can use them.
+static bool insertHistoryEvent(sqlite3* db, int complaintId, int changedByUserId,
+                               const std::string& status, const std::string& notes);
+static bool getUserFullName(sqlite3* db, int userId, std::string& name);
+
 Database::Database()
     : db(nullptr) {
 }
@@ -83,6 +90,10 @@ bool Database::connect(const std::string& path) {
         "area_id INTEGER NOT NULL,"
         "photo_path TEXT,"
         "status TEXT DEFAULT 'Submitted',"
+        "rejection_reason TEXT DEFAULT '',"
+        "duplicate_of TEXT DEFAULT '',"
+        "resolution_note TEXT DEFAULT '',"
+        "escalated INTEGER DEFAULT 0,"
         "created_at TEXT DEFAULT CURRENT_TIMESTAMP,"
         "updated_at TEXT DEFAULT CURRENT_TIMESTAMP,"
         "FOREIGN KEY (citizen_id) REFERENCES users(id),"
@@ -118,6 +129,27 @@ bool Database::connect(const std::string& path) {
         "model_version TEXT,"
         "predicted_at TEXT DEFAULT CURRENT_TIMESTAMP,"
         "admin_override INTEGER DEFAULT 0,"
+        "FOREIGN KEY (complaint_id) REFERENCES complaints(id)"
+        ");",
+        "CREATE TABLE IF NOT EXISTS complaint_notes ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "complaint_id INTEGER NOT NULL,"
+        "author_id INTEGER NOT NULL,"
+        "author_role TEXT NOT NULL,"
+        "body TEXT NOT NULL,"
+        "created_at TEXT DEFAULT CURRENT_TIMESTAMP,"
+        "FOREIGN KEY (complaint_id) REFERENCES complaints(id),"
+        "FOREIGN KEY (author_id) REFERENCES users(id)"
+        ");",
+        "CREATE TABLE IF NOT EXISTS notifications ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "user_id INTEGER NOT NULL,"
+        "complaint_id INTEGER NOT NULL,"
+        "kind TEXT NOT NULL,"
+        "message TEXT NOT NULL,"
+        "is_read INTEGER DEFAULT 0,"
+        "created_at TEXT DEFAULT CURRENT_TIMESTAMP,"
+        "FOREIGN KEY (user_id) REFERENCES users(id),"
         "FOREIGN KEY (complaint_id) REFERENCES complaints(id)"
         ");",
     };
@@ -203,6 +235,10 @@ bool Database::connect(const std::string& path) {
             {"ai_category", "TEXT DEFAULT ''"},
             {"ai_confidence", "REAL DEFAULT 0"},
             {"ai_image_label", "TEXT DEFAULT ''"},
+            {"rejection_reason", "TEXT DEFAULT ''"},
+            {"duplicate_of", "TEXT DEFAULT ''"},
+            {"resolution_note", "TEXT DEFAULT ''"},
+            {"escalated", "INTEGER DEFAULT 0"},
         };
         for (const auto& col : newColumns) {
             sqlite3_stmt* stmt = nullptr;
@@ -227,13 +263,14 @@ bool Database::isReady() {
     const char* sql =
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN "
         "('users', 'areas', 'complaints', 'status_history', 'assignments', "
-        "'ai_predictions', 'admin_actions', 'sessions');";
+        "'ai_predictions', 'admin_actions', 'sessions', "
+        "'complaint_notes', 'notifications');";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
     int count = 0;
     if (sqlite3_step(stmt) == SQLITE_ROW) count = sqlite3_column_int(stmt, 0);
     sqlite3_finalize(stmt);
-    return count == 8;
+    return count == 10;
 }
 
 void Database::disconnect() {
@@ -745,7 +782,8 @@ std::vector<Complaint> Database::getAllComplaints() {
         "SELECT id, tracking_code, citizen_id, title, description, "
         "category, priority_score, area_id, photo_path, status, "
         "created_at, updated_at, latitude, longitude, ai_category, "
-        "ai_confidence, ai_image_label "
+        "ai_confidence, ai_image_label, rejection_reason, duplicate_of, "
+        "resolution_note, escalated "
         "FROM complaints ORDER BY id;";
 
     sqlite3_stmt* stmt = nullptr;
@@ -855,7 +893,7 @@ bool Database::updateComplaintStatus(
 
     // Retrieve current status and tracking code.
     const char* selectSQL =
-        "SELECT status, tracking_code "
+        "SELECT status, tracking_code, citizen_id "
         "FROM complaints WHERE id = ?;";
 
     sqlite3_stmt* selectStmt = nullptr;
@@ -893,6 +931,7 @@ bool Database::updateComplaintStatus(
 
     std::string complaintCode =
         codeText ? reinterpret_cast<const char*>(codeText) : "";
+    int citizenId = sqlite3_column_int(selectStmt, 2);
 
     sqlite3_finalize(selectStmt);
 
@@ -942,6 +981,50 @@ bool Database::updateComplaintStatus(
                   << sqlite3_errmsg(db) << '\n';
         execute("ROLLBACK;");
         return false;
+    }
+
+    // Phase 3 (11 Nov 2026, handoff-2): keep the lifecycle columns
+    // in step with the status, in the same transaction. A rejection
+    // stores its reason on the complaint (the API requires one);
+    // reopening a closed complaint clears the rejection reason,
+    // the duplicate link and the resolution note, so the case
+    // comes back to triage clean.
+    if (newStatus == ComplaintStatus::Rejected) {
+        const char* reasonSQL =
+            "UPDATE complaints SET rejection_reason = ? WHERE id = ?;";
+        sqlite3_stmt* reasonStmt = nullptr;
+        if (sqlite3_prepare_v2(db, reasonSQL, -1, &reasonStmt, nullptr) != SQLITE_OK) {
+            std::cerr << "Could not prepare rejection reason update: "
+                      << sqlite3_errmsg(db) << '\n';
+            execute("ROLLBACK;");
+            return false;
+        }
+        if (sqlite3_bind_text(reasonStmt, 1, notes.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK ||
+            sqlite3_bind_int(reasonStmt, 2, complaintId) != SQLITE_OK) {
+            std::cerr << "Could not bind rejection reason values: "
+                      << sqlite3_errmsg(db) << '\n';
+            sqlite3_finalize(reasonStmt);
+            execute("ROLLBACK;");
+            return false;
+        }
+        result = sqlite3_step(reasonStmt);
+        sqlite3_finalize(reasonStmt);
+        if (result != SQLITE_DONE) {
+            std::cerr << "Rejection reason update failed: "
+                      << sqlite3_errmsg(db) << '\n';
+            execute("ROLLBACK;");
+            return false;
+        }
+    } else if (newStatus == ComplaintStatus::UnderReview &&
+               (oldStatus == "Resolved" || oldStatus == "Rejected")) {
+        if (!execute("UPDATE complaints SET rejection_reason = '', "
+                     "duplicate_of = '', resolution_note = '' "
+                     "WHERE id = " + std::to_string(complaintId) + ";")) {
+            std::cerr << "Could not clear closed-case fields on reopen: "
+                      << sqlite3_errmsg(db) << '\n';
+            execute("ROLLBACK;");
+            return false;
+        }
     }
 
     // Insert permanent status history.
@@ -1030,6 +1113,17 @@ bool Database::updateComplaintStatus(
 
     if (result != SQLITE_DONE) {
         std::cerr << "Admin action insertion failed: "
+                  << sqlite3_errmsg(db) << '\n';
+        execute("ROLLBACK;");
+        return false;
+    }
+
+    // Notify the citizen in the same transaction: if the status
+    // change commits, the notification exists; if it rolls back,
+    // so does the notification. No orphan rows either way.
+    if (!addNotification(citizenId, complaintId, "status",
+            "Your report " + complaintCode + " is now " + newStatusText)) {
+        std::cerr << "Status notification insert failed: "
                   << sqlite3_errmsg(db) << '\n';
         execute("ROLLBACK;");
         return false;
@@ -1572,6 +1666,10 @@ static bool fillComplaintFromRow(sqlite3_stmt* stmt, Complaint& c) {
     c.aiSuggestedCategory = getText(14);
     c.aiConfidence = sqlite3_column_double(stmt, 15);
     c.aiImageLabel = getText(16);
+    c.rejectionReason = getText(17);
+    c.duplicateOf = getText(18);
+    c.resolutionNote = getText(19);
+    c.escalated = sqlite3_column_int(stmt, 20) != 0;
     return true;
 }
 
@@ -1581,7 +1679,8 @@ bool Database::getComplaintById(int complaintId, Complaint& complaint) {
         "SELECT id, tracking_code, citizen_id, title, description, "
         "category, priority_score, area_id, photo_path, status, "
         "created_at, updated_at, latitude, longitude, ai_category, "
-        "ai_confidence, ai_image_label FROM complaints WHERE id = ?;";
+        "ai_confidence, ai_image_label, rejection_reason, duplicate_of, "
+        "resolution_note, escalated FROM complaints WHERE id = ?;";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
     sqlite3_bind_int(stmt, 1, complaintId);
@@ -1600,7 +1699,8 @@ bool Database::getComplaintByTrackingCode(const std::string& trackingCode, Compl
         "SELECT id, tracking_code, citizen_id, title, description, "
         "category, priority_score, area_id, photo_path, status, "
         "created_at, updated_at, latitude, longitude, ai_category, "
-        "ai_confidence, ai_image_label FROM complaints WHERE tracking_code = ?;";
+        "ai_confidence, ai_image_label, rejection_reason, duplicate_of, "
+        "resolution_note, escalated FROM complaints WHERE tracking_code = ?;";
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
     sqlite3_bind_text(stmt, 1, trackingCode.c_str(), -1, SQLITE_TRANSIENT);
@@ -1787,25 +1887,75 @@ bool Database::deleteSession(const std::string& token) {
     return ok;
 }
 
-bool Database::assignComplaint(int complaintId, int staffId, int assignedByAdminId) {
+bool Database::assignComplaint(int complaintId, int staffId, int assignedByAdminId, int& previousStaffId) {
+    previousStaffId = 0;
     if (db == nullptr) return false;
+    // Look up the complaint and the current assignee first, so the
+    // audit trail can name both sides of a reassignment.
+    Complaint c;
+    if (!getComplaintById(complaintId, c)) {
+        std::cerr << "Assignment failed: complaint not found.\n";
+        return false;
+    }
+    int currentStaff = 0;
+    bool hasCurrent = getCurrentAssignee(complaintId, currentStaff);
+    if (hasCurrent) previousStaffId = currentStaff;
+    std::string staffName, prevName;
+    if (!getUserFullName(db, staffId, staffName)) {
+        std::cerr << "Assignment failed: staff user not found.\n";
+        return false;
+    }
+    if (hasCurrent && !getUserFullName(db, currentStaff, prevName)) prevName = "";
+
+    if (!execute("BEGIN IMMEDIATE TRANSACTION;")) return false;
+    auto fail = [&]() { execute("ROLLBACK;"); return false; };
+    // Close the previous assignment (if any) so "currently
+    // assigned" stays exactly one row; the old row keeps its
+    // history through unassigned_at.
+    if (hasCurrent) {
+        const char* closeSQL =
+            "UPDATE assignments SET unassigned_at = CURRENT_TIMESTAMP "
+            "WHERE complaint_id = ? AND unassigned_at IS NULL;";
+        sqlite3_stmt* closeStmt = nullptr;
+        if (sqlite3_prepare_v2(db, closeSQL, -1, &closeStmt, nullptr) != SQLITE_OK) return fail();
+        sqlite3_bind_int(closeStmt, 1, complaintId);
+        if (sqlite3_step(closeStmt) != SQLITE_DONE) {
+            std::cerr << "Could not close previous assignment: " << sqlite3_errmsg(db) << '\n';
+            sqlite3_finalize(closeStmt);
+            return fail();
+        }
+        sqlite3_finalize(closeStmt);
+    }
     const char* sql =
         "INSERT INTO assignments (complaint_id, staff_id, assigned_by_admin_id) "
         "VALUES (?, ?, ?);";
     sqlite3_stmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-        std::cerr << "Assignment preparation failed: " << sqlite3_errmsg(db) << '\n';
-        return false;
-    }
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return fail();
     sqlite3_bind_int(stmt, 1, complaintId);
     sqlite3_bind_int(stmt, 2, staffId);
     sqlite3_bind_int(stmt, 3, assignedByAdminId);
-    int result = sqlite3_step(stmt);
-    if (result != SQLITE_DONE) {
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
         std::cerr << "Assignment failed: " << sqlite3_errmsg(db) << '\n';
+        sqlite3_finalize(stmt);
+        return fail();
     }
     sqlite3_finalize(stmt);
-    return result == SQLITE_DONE;
+    // Audit trail: assignment used to be silent - the timeline
+    // never showed who got a case or when it changed hands. A
+    // same-status history event records it without touching the
+    // undo stack (assignments stay out of admin_actions by design).
+    std::string event = hasCurrent
+        ? "Reassigned from " + prevName + " to " + staffName
+        : "Assigned to " + staffName;
+    if (!insertHistoryEvent(db, complaintId, assignedByAdminId, toString(c.status), event)) return fail();
+    // Notify the new staff member and the citizen, in the same
+    // transaction as the assignment itself.
+    if (!addNotification(staffId, complaintId, "assignment",
+            "You were assigned " + c.trackingCode + ": " + c.title)) return fail();
+    if (!addNotification(c.citizenId, complaintId, "assignment",
+            "Your report " + c.trackingCode + " was assigned to " + staffName)) return fail();
+    if (!execute("COMMIT;")) return fail();
+    return true;
 }
 
 std::vector<Complaint> Database::getComplaintsAssignedTo(int staffId) {
@@ -1819,7 +1969,8 @@ std::vector<Complaint> Database::getComplaintsAssignedTo(int staffId) {
         "SELECT c.id, c.tracking_code, c.citizen_id, c.title, c.description, "
         "c.category, c.priority_score, c.area_id, c.photo_path, c.status, "
         "c.created_at, c.updated_at, c.latitude, c.longitude, c.ai_category, "
-        "c.ai_confidence, c.ai_image_label FROM complaints c "
+        "c.ai_confidence, c.ai_image_label, c.rejection_reason, c.duplicate_of, "
+        "c.resolution_note, c.escalated FROM complaints c "
         "JOIN assignments a ON a.complaint_id = c.id "
         "WHERE a.staff_id = ? AND a.unassigned_at IS NULL "
         "AND a.id = (SELECT MAX(a2.id) FROM assignments a2 "
@@ -1863,5 +2014,314 @@ std::vector<AdminAction> Database::getAllAdminActions() {
     return actions;
 }
 
+
+// ========================================
+// PHASE 3 - LIFECYCLE (11 Nov 2026)
+// ========================================
+// Duplicates, escalation, progress notes and in-app notifications.
+// Every method below runs its writes inside one transaction
+// together with its audit rows, following the pattern of
+// updateComplaintStatus: a failure rolls everything back, so a
+// retry never leaves a half-applied change behind.
+
+// A timeline event that does not change the status (assignment,
+// reassignment, escalation): same-status history row, so the
+// incident timeline explains who did what and when.
+static bool insertHistoryEvent(sqlite3* db, int complaintId, int changedByUserId,
+                               const std::string& status, const std::string& notes) {
+    const char* sql =
+        "INSERT INTO status_history "
+        "(complaint_id, changed_by_user_id, old_status, new_status, notes, created_at) "
+        "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP);";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    bool ok = sqlite3_bind_int(stmt, 1, complaintId) == SQLITE_OK &&
+              sqlite3_bind_int(stmt, 2, changedByUserId) == SQLITE_OK &&
+              sqlite3_bind_text(stmt, 3, status.c_str(), -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+              sqlite3_bind_text(stmt, 4, status.c_str(), -1, SQLITE_TRANSIENT) == SQLITE_OK &&
+              sqlite3_bind_text(stmt, 5, notes.c_str(), -1, SQLITE_TRANSIENT) == SQLITE_OK;
+    if (ok) ok = sqlite3_step(stmt) == SQLITE_DONE;
+    if (!ok) std::cerr << "History event insert failed: " << sqlite3_errmsg(db) << '\n';
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+static bool getUserFullName(sqlite3* db, int userId, std::string& name) {
+    const char* sql = "SELECT full_name FROM users WHERE id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_int(stmt, 1, userId);
+    bool found = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const unsigned char* v = sqlite3_column_text(stmt, 0);
+        name = v ? reinterpret_cast<const char*>(v) : "";
+        found = true;
+    }
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+bool Database::getCurrentAssignee(int complaintId, int& staffId) {
+    staffId = 0;
+    if (db == nullptr) return false;
+    const char* sql =
+        "SELECT staff_id FROM assignments "
+        "WHERE complaint_id = ? AND unassigned_at IS NULL "
+        "ORDER BY id DESC LIMIT 1;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_int(stmt, 1, complaintId);
+    bool found = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        staffId = sqlite3_column_int(stmt, 0);
+        found = true;
+    }
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+bool Database::markComplaintDuplicate(int complaintId, const std::string& duplicateOfCode, int changedByUserId, const std::string& notes) {
+    if (db == nullptr) return false;
+    Complaint c, target;
+    if (!getComplaintById(complaintId, c)) return false;
+    if (!getComplaintByTrackingCode(duplicateOfCode, target)) return false;
+    // A report cannot duplicate itself, duplicate a report that
+    // is itself a duplicate (no chains), or be marked duplicate
+    // once it is already closed.
+    if (target.id == complaintId || !target.duplicateOf.empty() ||
+        c.status == ComplaintStatus::Resolved || c.status == ComplaintStatus::Rejected) {
+        return false;
+    }
+    std::string oldStatusText = toString(c.status);
+    if (!execute("BEGIN IMMEDIATE TRANSACTION;")) return false;
+    auto fail = [&]() { execute("ROLLBACK;"); return false; };
+    std::string resolution = "Duplicate of " + duplicateOfCode;
+    if (!notes.empty()) resolution += " - " + notes;
+    const char* updateSQL =
+        "UPDATE complaints SET status = 'Resolved', duplicate_of = ?, "
+        "resolution_note = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;";
+    sqlite3_stmt* updateStmt = nullptr;
+    if (sqlite3_prepare_v2(db, updateSQL, -1, &updateStmt, nullptr) != SQLITE_OK) return fail();
+    sqlite3_bind_text(updateStmt, 1, duplicateOfCode.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(updateStmt, 2, resolution.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(updateStmt, 3, complaintId);
+    if (sqlite3_step(updateStmt) != SQLITE_DONE) {
+        std::cerr << "Duplicate marking failed: " << sqlite3_errmsg(db) << '\n';
+        sqlite3_finalize(updateStmt);
+        return fail();
+    }
+    sqlite3_finalize(updateStmt);
+    const char* historySQL =
+        "INSERT INTO status_history "
+        "(complaint_id, changed_by_user_id, old_status, new_status, notes, created_at) "
+        "VALUES (?, ?, ?, 'Resolved', ?, CURRENT_TIMESTAMP);";
+    sqlite3_stmt* historyStmt = nullptr;
+    if (sqlite3_prepare_v2(db, historySQL, -1, &historyStmt, nullptr) != SQLITE_OK) return fail();
+    sqlite3_bind_int(historyStmt, 1, complaintId);
+    sqlite3_bind_int(historyStmt, 2, changedByUserId);
+    sqlite3_bind_text(historyStmt, 3, oldStatusText.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(historyStmt, 4, resolution.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(historyStmt) != SQLITE_DONE) {
+        std::cerr << "Duplicate history insert failed: " << sqlite3_errmsg(db) << '\n';
+        sqlite3_finalize(historyStmt);
+        return fail();
+    }
+    sqlite3_finalize(historyStmt);
+    const char* actionSQL =
+        "INSERT INTO admin_actions (description, complaint_code, previous_status, new_status) "
+        "VALUES ('Marked as duplicate', ?, ?, 'Resolved');";
+    sqlite3_stmt* actionStmt = nullptr;
+    if (sqlite3_prepare_v2(db, actionSQL, -1, &actionStmt, nullptr) != SQLITE_OK) return fail();
+    sqlite3_bind_text(actionStmt, 1, c.trackingCode.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(actionStmt, 2, oldStatusText.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(actionStmt) != SQLITE_DONE) {
+        std::cerr << "Duplicate admin action insert failed: " << sqlite3_errmsg(db) << '\n';
+        sqlite3_finalize(actionStmt);
+        return fail();
+    }
+    sqlite3_finalize(actionStmt);
+    if (!addNotification(c.citizenId, complaintId, "duplicate",
+            "Your report " + c.trackingCode + " was marked as a duplicate of " + duplicateOfCode)) return fail();
+    if (!execute("COMMIT;")) return fail();
+    return true;
+}
+
+bool Database::escalateComplaint(int complaintId, int changedByUserId, const std::string& reason) {
+    if (db == nullptr || reason.empty()) return false;
+    Complaint c;
+    if (!getComplaintById(complaintId, c)) return false;
+    if (c.escalated) return false;
+    if (c.status == ComplaintStatus::Resolved || c.status == ComplaintStatus::Rejected) return false;
+    if (!execute("BEGIN IMMEDIATE TRANSACTION;")) return false;
+    auto fail = [&]() { execute("ROLLBACK;"); return false; };
+    if (!execute("UPDATE complaints SET priority_score = 5, escalated = 1, "
+                 "updated_at = CURRENT_TIMESTAMP WHERE id = " + std::to_string(complaintId) + ";")) {
+        std::cerr << "Escalation update failed: " << sqlite3_errmsg(db) << '\n';
+        return fail();
+    }
+    if (!insertHistoryEvent(db, complaintId, changedByUserId, toString(c.status),
+            "Escalated: " + reason)) return fail();
+    int assignee = 0;
+    if (getCurrentAssignee(complaintId, assignee)) {
+        if (!addNotification(assignee, complaintId, "escalation",
+                c.trackingCode + " was escalated: " + reason)) return fail();
+    }
+    if (!execute("COMMIT;")) return fail();
+    return true;
+}
+
+bool Database::addComplaintNote(int complaintId, int authorId, const std::string& authorRole, const std::string& body, int& noteId) {
+    noteId = 0;
+    if (db == nullptr || body.empty()) return false;
+    Complaint c;
+    if (!getComplaintById(complaintId, c)) return false;
+    if (!execute("BEGIN IMMEDIATE TRANSACTION;")) return false;
+    auto fail = [&]() { execute("ROLLBACK;"); return false; };
+    const char* sql =
+        "INSERT INTO complaint_notes (complaint_id, author_id, author_role, body) "
+        "VALUES (?, ?, ?, ?);";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return fail();
+    sqlite3_bind_int(stmt, 1, complaintId);
+    sqlite3_bind_int(stmt, 2, authorId);
+    sqlite3_bind_text(stmt, 3, authorRole.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, body.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        std::cerr << "Note insert failed: " << sqlite3_errmsg(db) << '\n';
+        sqlite3_finalize(stmt);
+        return fail();
+    }
+    sqlite3_finalize(stmt);
+    // The bundled sqlite3.h does not declare
+    // sqlite3_last_insert_rowid, so read the id back with SQL.
+    {
+        const char* rowidSQL = "SELECT last_insert_rowid();";
+        sqlite3_stmt* rowidStmt = nullptr;
+        if (sqlite3_prepare_v2(db, rowidSQL, -1, &rowidStmt, nullptr) == SQLITE_OK &&
+            sqlite3_step(rowidStmt) == SQLITE_ROW) {
+            noteId = sqlite3_column_int(rowidStmt, 0);
+        }
+        sqlite3_finalize(rowidStmt);
+    }
+    // Route the notification to whoever needs to act on the note:
+    // a citizen follow-up goes to the assigned staff member (or
+    // the admins when nobody is assigned yet); a staff/admin
+    // update goes to the citizen who filed the report.
+    if (authorRole == "Citizen") {
+        int assignee = 0;
+        if (getCurrentAssignee(complaintId, assignee)) {
+            if (!addNotification(assignee, complaintId, "note",
+                    "Citizen added a follow-up on " + c.trackingCode)) return fail();
+        } else {
+            const char* adminSQL = "SELECT id FROM users WHERE role = 'Admin' AND is_active = 1;";
+            sqlite3_stmt* adminStmt = nullptr;
+            if (sqlite3_prepare_v2(db, adminSQL, -1, &adminStmt, nullptr) != SQLITE_OK) return fail();
+            while (sqlite3_step(adminStmt) == SQLITE_ROW) {
+                int adminId = sqlite3_column_int(adminStmt, 0);
+                if (!addNotification(adminId, complaintId, "note",
+                        "Citizen added a follow-up on " + c.trackingCode)) {
+                    sqlite3_finalize(adminStmt);
+                    return fail();
+                }
+            }
+            sqlite3_finalize(adminStmt);
+        }
+    } else {
+        if (!addNotification(c.citizenId, complaintId, "note",
+                authorRole + " added an update on your report " + c.trackingCode)) return fail();
+    }
+    if (!execute("COMMIT;")) return fail();
+    return true;
+}
+
+std::vector<ComplaintNote> Database::getComplaintNotes(int complaintId) {
+    std::vector<ComplaintNote> notes;
+    if (db == nullptr) return notes;
+    const char* sql =
+        "SELECT id, complaint_id, author_id, author_role, body, created_at "
+        "FROM complaint_notes WHERE complaint_id = ? ORDER BY id;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return notes;
+    sqlite3_bind_int(stmt, 1, complaintId);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        ComplaintNote n;
+        auto getText = [stmt](int column) -> std::string {
+            const unsigned char* v = sqlite3_column_text(stmt, column);
+            return v ? reinterpret_cast<const char*>(v) : "";
+        };
+        n.id = sqlite3_column_int(stmt, 0);
+        n.complaintId = sqlite3_column_int(stmt, 1);
+        n.authorId = sqlite3_column_int(stmt, 2);
+        n.authorRole = getText(3);
+        n.body = getText(4);
+        n.createdAt = getText(5);
+        notes.push_back(n);
+    }
+    sqlite3_finalize(stmt);
+    return notes;
+}
+
+bool Database::addNotification(int userId, int complaintId, const std::string& kind, const std::string& message) {
+    // Plain INSERT, no transaction of its own: every caller runs
+    // inside its own transaction, so the notification commits or
+    // rolls back together with the event that caused it.
+    if (db == nullptr) return false;
+    const char* sql =
+        "INSERT INTO notifications (user_id, complaint_id, kind, message) "
+        "VALUES (?, ?, ?, ?);";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        std::cerr << "Notification insert failed: " << sqlite3_errmsg(db) << '\n';
+        return false;
+    }
+    sqlite3_bind_int(stmt, 1, userId);
+    sqlite3_bind_int(stmt, 2, complaintId);
+    sqlite3_bind_text(stmt, 3, kind.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, message.c_str(), -1, SQLITE_TRANSIENT);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    if (!ok) std::cerr << "Notification insert failed: " << sqlite3_errmsg(db) << '\n';
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+std::vector<Notification> Database::getNotificationsForUser(int userId) {
+    std::vector<Notification> out;
+    if (db == nullptr) return out;
+    const char* sql =
+        "SELECT id, user_id, complaint_id, kind, message, is_read, created_at "
+        "FROM notifications WHERE user_id = ? ORDER BY id DESC LIMIT 50;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return out;
+    sqlite3_bind_int(stmt, 1, userId);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        Notification n;
+        auto getText = [stmt](int column) -> std::string {
+            const unsigned char* v = sqlite3_column_text(stmt, column);
+            return v ? reinterpret_cast<const char*>(v) : "";
+        };
+        n.id = sqlite3_column_int(stmt, 0);
+        n.userId = sqlite3_column_int(stmt, 1);
+        n.complaintId = sqlite3_column_int(stmt, 2);
+        n.kind = getText(3);
+        n.message = getText(4);
+        n.isRead = sqlite3_column_int(stmt, 5) != 0;
+        n.createdAt = getText(6);
+        out.push_back(n);
+    }
+    sqlite3_finalize(stmt);
+    return out;
+}
+
+bool Database::markNotificationRead(int notificationId, int userId) {
+    if (db == nullptr) return false;
+    const char* sql = "UPDATE notifications SET is_read = 1 WHERE id = ? AND user_id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_int(stmt, 1, notificationId);
+    sqlite3_bind_int(stmt, 2, userId);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db) == 1;
+    sqlite3_finalize(stmt);
+    return ok;
+}
 
 } // namespace civicfix

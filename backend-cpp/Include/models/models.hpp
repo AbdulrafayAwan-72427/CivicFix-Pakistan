@@ -69,6 +69,16 @@ struct Complaint {
     std::string aiSuggestedCategory;
     double aiConfidence = 0.0;
     std::string aiImageLabel;
+    // Phase 3 (11 Nov 2026, handoff-2): lifecycle fields.
+    // rejectionReason is the admin's reason when a complaint is
+    // Rejected (required by the API); duplicateOf is the tracking
+    // code this report duplicates (empty unless marked a duplicate);
+    // resolutionNote records how a case was closed; escalated marks
+    // a case an admin escalated to priority 5.
+    std::string rejectionReason;
+    std::string duplicateOf;
+    std::string resolutionNote;
+    bool escalated = false;
     ComplaintStatus status = ComplaintStatus::Submitted;
     std::string createdAt;
     std::string updatedAt;
@@ -81,6 +91,25 @@ struct StatusUpdate {
     ComplaintStatus oldStatus = ComplaintStatus::Submitted;
     ComplaintStatus newStatus = ComplaintStatus::Submitted;
     std::string notes;
+    std::string createdAt;
+};
+
+struct ComplaintNote {
+    int id = 0;
+    int complaintId = 0;
+    int authorId = 0;
+    std::string authorRole;
+    std::string body;
+    std::string createdAt;
+};
+
+struct Notification {
+    int id = 0;
+    int userId = 0;
+    int complaintId = 0;
+    std::string kind;
+    std::string message;
+    bool isRead = false;
     std::string createdAt;
 };
 

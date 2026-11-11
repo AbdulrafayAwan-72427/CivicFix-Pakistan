@@ -104,6 +104,20 @@ export const post = (endpoint, body) =>
 export const patch = (endpoint, body) =>
   api(endpoint, { method: 'PATCH', body: JSON.stringify(body) })
 
+// Phase 3 (11 Nov 2026, handoff-2): the operational lifecycle.
+// Notes are the progress thread (staff updates, citizen follow-ups);
+// duplicates and escalation are Admin-only; notifications are the
+// in-app inbox (no email/SMS is configured — nothing is faked as sent).
+export const getNotes = (complaintId) => get(`/api/complaints/${complaintId}/notes`)
+export const addNote = (complaintId, body) => post(`/api/complaints/${complaintId}/notes`, { body })
+export const markDuplicate = (complaintId, duplicateOfCode, changedByUserId, notes) =>
+  post(`/api/complaints/${complaintId}/duplicate`, { duplicateOfCode, changedByUserId, notes: notes || '' })
+export const escalateComplaint = (complaintId, reason, changedByUserId) =>
+  post(`/api/complaints/${complaintId}/escalate`, { reason, changedByUserId })
+export const getNotifications = () => get('/api/me/notifications')
+export const markNotificationRead = (notificationId) =>
+  post(`/api/me/notifications/${notificationId}/read`, {})
+
 export const CATEGORIES = [
   'Garbage Collection',
   'Road Damage',

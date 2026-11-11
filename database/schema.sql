@@ -27,6 +27,10 @@ CREATE TABLE complaints (
     area_id INTEGER NOT NULL,
     photo_path TEXT,
     status TEXT DEFAULT 'Submitted',
+    rejection_reason TEXT DEFAULT '',
+    duplicate_of TEXT DEFAULT '',
+    resolution_note TEXT DEFAULT '',
+    escalated INTEGER DEFAULT 0,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (citizen_id) REFERENCES users(id),
@@ -55,6 +59,29 @@ CREATE TABLE assignments (
     FOREIGN KEY (complaint_id) REFERENCES complaints(id),
     FOREIGN KEY (staff_id) REFERENCES users(id),
     FOREIGN KEY (assigned_by_admin_id) REFERENCES users(id)
+);
+
+CREATE TABLE complaint_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    complaint_id INTEGER NOT NULL,
+    author_id INTEGER NOT NULL,
+    author_role TEXT NOT NULL,
+    body TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (complaint_id) REFERENCES complaints(id),
+    FOREIGN KEY (author_id) REFERENCES users(id)
+);
+
+CREATE TABLE notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    complaint_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    message TEXT NOT NULL,
+    is_read INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (complaint_id) REFERENCES complaints(id)
 );
 
 CREATE TABLE ai_predictions (
