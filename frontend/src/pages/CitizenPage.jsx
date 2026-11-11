@@ -5,19 +5,14 @@ import ComplaintDetails from '../components/ComplaintDetails.jsx'
 import EmptyState from '../components/EmptyState.jsx'
 import Feedback from '../components/Feedback.jsx'
 import MapPicker from '../components/MapPicker.jsx'
-import { LedgerButton, LedgerCard, LedgerField, LedgerNav } from '../components/ledger/Ledger.jsx'
+import { LedgerButton, LedgerCard, LedgerField } from '../components/ledger/Ledger.jsx'
 
 // Civic Ledger rollout (11 Nov 2026): the Track a complaint section
 // below uses the approved Ledger kit. Everything else on this page
-// keeps the existing styles until the theme is reviewed. The Ledger
-// nav reuses the same citizen items as the sidebar (Submit / Track /
-// My complaints) and calls back to App.jsx's scroll handler.
-const TRACK_NAV = [
-  { id: 'submit', label: 'Submit a report' },
-  { id: 'track', label: 'Track a report' },
-  { id: 'mine', label: 'My complaints' },
-]
-const NAV_TARGET = { submit: 'submit-card', track: 'track-card', mine: 'my-complaints-card' }
+// keeps the existing styles until the theme is reviewed. Navigation
+// stays in the citizen sidebar in App.jsx — there is no second nav
+// on this screen (removed 11 Nov 2026: the Ledger nav always marked
+// Track as active, even after another section was selected).
 
 // Approximate centres, so picking an area drops the pin nearby —
 // the citizen can still drag/click it to the exact spot.
@@ -32,7 +27,7 @@ const AREA_COORDS = {
 // Citizen view: submit a complaint, track one by code, and see my complaints.
 // The API returns only this citizen's own complaints (see the security
 // fix, 8 Nov 2026); the browser filter below is only for the search box.
-export default function CitizenPage({ currentUser, areas, users = [], onNavigate }) {
+export default function CitizenPage({ currentUser, areas, users = [] }) {
   const [form, setForm] = useState({ title: '', description: '', category: 'Garbage Collection', severity: 'normal', areaId: '' })
   const [submitMsg, setSubmitMsg] = useState('')
   const [submitError, setSubmitError] = useState('')
@@ -214,12 +209,6 @@ export default function CitizenPage({ currentUser, areas, users = [], onNavigate
         </div>
 
         <div className="civic-ledger" id="track-card">
-          <LedgerNav
-            label="Citizen sections"
-            items={TRACK_NAV}
-            current="track"
-            onSelect={(id) => onNavigate && onNavigate(NAV_TARGET[id], id)}
-          />
           <div className="ledger-masthead">
             <img src="/logo.webp" alt="" aria-hidden="true" />
             <div>
@@ -258,9 +247,13 @@ export default function CitizenPage({ currentUser, areas, users = [], onNavigate
               >
                 Track another code
               </LedgerButton>
-              <div className="mt-12">
-                <ComplaintDetails complaint={tracked} areas={areas} users={users} currentUser={currentUser} />
-              </div>
+              {/* The public lookup returns only trackingCode, status
+                  and updatedAt — it deliberately does NOT go through
+                  ComplaintDetails, which expects a full complaint
+                  (title, area, citizen, priority, history) and would
+                  render "undefined" fields. Full details stay in
+                  My complaints below, which uses the authenticated
+                  list. */}
             </LedgerCard>
           )}
         </div>

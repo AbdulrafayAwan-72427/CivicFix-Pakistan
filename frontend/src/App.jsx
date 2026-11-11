@@ -247,7 +247,7 @@ export default function App() {
             </div>
           )}
 
-          {tab === 'citizen' && <CitizenPage currentUser={currentUser} areas={areas} users={users} onNavigate={(targetId, navKey) => goTo(targetId, navKey)} />}
+          {tab === 'citizen' && <CitizenPage currentUser={currentUser} areas={areas} users={users} />}
           {tab === 'admin' && <AdminPage currentUser={currentUser} users={users} areas={areas} onUsersChanged={reloadUsers} section={adminSection} onSectionChange={setAdminSection} />}
           {tab === 'staff' && <StaffPage currentUser={currentUser} areas={areas} users={users} />}
         </main>
